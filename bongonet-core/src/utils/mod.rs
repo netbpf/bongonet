@@ -15,6 +15,8 @@
 //! This module contains various types that make it easier to work with bytes and X509
 //! certificates.
 
+pub mod tls;
+
 // TODO: move below to its own mod
 use crate::tls::{nid::Nid, pkey::PKey, pkey::Private, x509::X509};
 use crate::Result;
