@@ -1,4 +1,4 @@
-// Copyright 2024 Khulnasoft, Ltd.
+// Copyright 2025 KhulnaSoft, Ltd
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,11 +23,11 @@ use super::http::v1::client::HttpSession;
 use super::http::v1::common::*;
 use super::Stream;
 
+use bongonet_error::{Error, ErrorType::*, OrErr, Result};
+use bongonet_http::ResponseHeader;
 use bytes::{BufMut, BytesMut};
 use http::request::Parts as ReqHeader;
 use http::Version;
-use bongonet_error::{Error, ErrorType::*, OrErr, Result};
-use bongonet_http::ResponseHeader;
 use tokio::io::AsyncWriteExt;
 
 /// Try to establish a CONNECT proxy via the given `stream`.

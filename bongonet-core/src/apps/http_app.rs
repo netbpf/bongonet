@@ -1,4 +1,4 @@
-// Copyright 2024 Khulnasoft, Ltd.
+// Copyright 2025 KhulnaSoft, Ltd
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A simple HTTP application trait that maps a request to a response
+//! The abstraction and implementation interface for service application logic
 
 use async_trait::async_trait;
 use bongonet_http::ResponseHeader;
