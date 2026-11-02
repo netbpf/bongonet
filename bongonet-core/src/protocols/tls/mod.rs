@@ -83,6 +83,7 @@ where
         self.digest = Some(Arc::new(SslDigest::from_ssl(self.ssl())));
         Ok(())
     }
+}
 
 #[cfg(feature = "rustls")]
 pub use rustls::*;
