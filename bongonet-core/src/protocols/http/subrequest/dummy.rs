@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use async_trait::async_trait;
-use bongonet_cache::lock::WritePermit;
-use bongonet_core::protocols::raw_connect::ProxyDigest;
-use bongonet_core::protocols::{
+use crate::protocols::raw_connect::ProxyDigest;
+use crate::protocols::{
     GetProxyDigest, GetSocketDigest, GetTimingDigest, Peek, SocketDigest, Ssl, TimingDigest,
     UniqueID, UniqueIDType,
 };
+use async_trait::async_trait;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::io::Cursor;
@@ -97,7 +96,7 @@ impl GetSocketDigest for DummyIO {
 impl Peek for DummyIO {}
 
 #[async_trait]
-impl bongonet_core::protocols::Shutdown for DummyIO {
+impl crate::protocols::Shutdown for DummyIO {
     async fn shutdown(&mut self) -> () {}
 }
 
@@ -115,31 +114,4 @@ async fn test_dummy_io() {
     assert!(res.is_none()); // pending forever
     let res = dummy.write_u8(0).await;
     assert!(res.is_ok());
-}
-
-// To share state across the parent req and the sub req
-pub(crate) struct Ctx {
-    pub(crate) write_lock: Option<WritePermit>,
-}
-
-use crate::HttpSession;
-
-pub(crate) fn create_dummy_session(parsed_session: &HttpSession) -> HttpSession {
-    // TODO: check if there is req body, we don't capture the body for now
-    HttpSession::new_http1(Box::new(DummyIO::new(&parsed_session.to_h1_raw())))
-}
-
-#[tokio::test]
-async fn test_dummy_request() {
-    use tokio_test::io::Builder;
-
-    let input = b"GET / HTTP/1.1\r\n\r\n";
-    let mock_io = Builder::new().read(&input[..]).build();
-    let mut req = HttpSession::new_http1(Box::new(mock_io));
-    req.read_request().await.unwrap();
-    assert_eq!(input.as_slice(), req.to_h1_raw());
-
-    let mut dummy_req = create_dummy_session(&req);
-    dummy_req.read_request().await.unwrap();
-    assert_eq!(input.as_slice(), req.to_h1_raw());
 }
