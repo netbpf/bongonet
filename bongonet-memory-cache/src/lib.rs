@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -320,9 +320,9 @@ mod tests {
     #[test]
     fn test_eviction() {
         let cache: MemoryCache<i32, i32> = MemoryCache::new(2);
-        cache.put(&1, 2, None);
-        cache.put(&2, 4, None);
-        cache.put(&3, 6, None);
+        cache.force_put(&1, 2, None);
+        cache.force_put(&2, 4, None);
+        cache.force_put(&3, 6, None);
         let (res, hit) = cache.get(&1);
         assert_eq!(res, None);
         assert_eq!(hit, CacheStatus::Miss);

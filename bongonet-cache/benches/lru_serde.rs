@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use bongonet_cache::{
-    eviction::{lru::Manager, EvictionManager},
+    eviction::{lru::Manager, CacheEntryKey, EvictionManager},
     CacheKey,
 };
 
@@ -26,8 +26,8 @@ fn main() {
     let manager2 = Manager::<32>::with_capacity(ITEMS, ITEMS / 32);
     let unused_ttl = std::time::SystemTime::now();
     for i in 0..ITEMS {
-        let item = CacheKey::new("", i.to_string(), "").to_compact();
-        manager.admit(item, 1, unused_ttl);
+        let item = CacheKey::new(i.to_string(), "").to_compact();
+        manager.admit(CacheEntryKey::key_only(item), 1, unused_ttl);
     }
 
     /* lru serialize shard 19 22.573338ms, 5241623 bytes

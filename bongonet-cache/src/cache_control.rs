@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,20 +22,174 @@ use http::HeaderValue;
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
 use regex::bytes::Regex;
+use std::fmt;
 use std::num::IntErrorKind;
 use std::slice;
 use std::str;
 
 /// The max delta-second per [RFC 9111](https://datatracker.ietf.org/doc/html/rfc9111#section-1.2.2)
-// "If a cache receives a delta-seconds
-// value greater than the greatest integer it can represent, or if any
-// of its subsequent calculations overflows, the cache MUST consider the
-// value to be either 2147483648 (2^31) or the greatest positive integer
-// it can conveniently represent."
-pub const DELTA_SECONDS_OVERFLOW_VALUE: u32 = 2147483648;
+// "If a cache receives a delta-seconds value
+// greater than the greatest integer it can represent, or if any of its
+// subsequent calculations overflows, the cache MUST consider the value
+// to be 2147483648 (2^31) or the greatest positive integer it can
+// conveniently represent.
+//
+//    |  *Note:* The value 2147483648 is here for historical reasons,
+//    |  represents infinity (over 68 years), and does not need to be
+//    |  stored in binary form; an implementation could produce it as a
+//    |  string if any overflow occurs, even if the calculations are
+//    |  performed with an arithmetic type incapable of directly
+//    |  representing that number.  What matters here is that an
+//    |  overflow be detected and not treated as a negative value in
+//    |  later calculations."
+//
+// We choose to use i32::MAX for our overflow value to stick to the letter of the RFC.
+pub const DELTA_SECONDS_OVERFLOW_VALUE: u32 = i32::MAX as u32;
+pub const DELTA_SECONDS_OVERFLOW_DURATION: Duration =
+    Duration::from_secs(DELTA_SECONDS_OVERFLOW_VALUE as u64);
 
-/// Cache control directive key type
-pub type DirectiveKey = String;
+/// Cache-Control directive key.
+///
+/// Known RFC 9111 (and common extension) directives are represented as enum variants,
+/// avoiding a heap allocation for every parsed directive. Unknown or extension
+/// directives are preserved via the [`Unknown`](Self::Unknown) variant.
+///
+/// Directive keys are always stored in lowercase, matching the case-insensitive
+/// comparison required by the HTTP specification.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DirectiveKey {
+    /// `max-age`
+    MaxAge,
+    /// `s-maxage`
+    SMaxAge,
+    /// `no-cache`
+    NoCache,
+    /// `no-store`
+    NoStore,
+    /// `private`
+    Private,
+    /// `public`
+    Public,
+    /// `must-revalidate`
+    MustRevalidate,
+    /// `proxy-revalidate`
+    ProxyRevalidate,
+    /// `must-understand`
+    MustUnderstand,
+    /// `no-transform`
+    NoTransform,
+    /// `immutable`
+    Immutable,
+    /// `stale-while-revalidate`
+    StaleWhileRevalidate,
+    /// `stale-if-error`
+    StaleIfError,
+    /// `only-if-cached`
+    OnlyIfCached,
+    /// An unknown or extension directive, stored as the original (lowercased) name.
+    Unknown(String),
+}
+
+impl DirectiveKey {
+    /// Return the wire-format name of this directive as a `&str`.
+    ///
+    /// Known variants return a `&'static str`; [`Unknown`](Self::Unknown)
+    /// returns a borrow of the inner `String`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::MaxAge => "max-age",
+            Self::SMaxAge => "s-maxage",
+            Self::NoCache => "no-cache",
+            Self::NoStore => "no-store",
+            Self::Private => "private",
+            Self::Public => "public",
+            Self::MustRevalidate => "must-revalidate",
+            Self::ProxyRevalidate => "proxy-revalidate",
+            Self::MustUnderstand => "must-understand",
+            Self::NoTransform => "no-transform",
+            Self::Immutable => "immutable",
+            Self::StaleWhileRevalidate => "stale-while-revalidate",
+            Self::StaleIfError => "stale-if-error",
+            Self::OnlyIfCached => "only-if-cached",
+            Self::Unknown(s) => s.as_str(),
+        }
+    }
+
+    /// Construct a [`DirectiveKey`] from a **lowercase** `&str`.
+    ///
+    /// Known directive names are mapped to their enum variant (zero allocation).
+    /// Anything else produces [`Unknown`](Self::Unknown) with an owned copy of
+    /// the string.
+    ///
+    /// The caller is responsible for lowercasing the input first; this function
+    /// does **not** perform case folding.
+    ///
+    /// See also [`from_lowercase_owned`](Self::from_lowercase_owned) to avoid a
+    /// re-allocation when the caller already has an owned `String`.
+    pub fn from_lowercase(s: &str) -> Self {
+        match s {
+            "max-age" => Self::MaxAge,
+            "s-maxage" => Self::SMaxAge,
+            "no-cache" => Self::NoCache,
+            "no-store" => Self::NoStore,
+            "private" => Self::Private,
+            "public" => Self::Public,
+            "must-revalidate" => Self::MustRevalidate,
+            "proxy-revalidate" => Self::ProxyRevalidate,
+            "must-understand" => Self::MustUnderstand,
+            "no-transform" => Self::NoTransform,
+            "immutable" => Self::Immutable,
+            "stale-while-revalidate" => Self::StaleWhileRevalidate,
+            "stale-if-error" => Self::StaleIfError,
+            "only-if-cached" => Self::OnlyIfCached,
+            other => Self::Unknown(other.to_owned()),
+        }
+    }
+
+    /// Construct a [`DirectiveKey`] from a **lowercase** owned `String`.
+    ///
+    /// Behaves identically to [`from_lowercase`](Self::from_lowercase) but
+    /// takes ownership of the `String`, avoiding a re-allocation when the
+    /// input maps to [`Unknown`](Self::Unknown).
+    pub fn from_lowercase_owned(s: String) -> Self {
+        // Check against known names first (the string is borrowed for matching).
+        match s.as_str() {
+            "max-age" => Self::MaxAge,
+            "s-maxage" => Self::SMaxAge,
+            "no-cache" => Self::NoCache,
+            "no-store" => Self::NoStore,
+            "private" => Self::Private,
+            "public" => Self::Public,
+            "must-revalidate" => Self::MustRevalidate,
+            "proxy-revalidate" => Self::ProxyRevalidate,
+            "must-understand" => Self::MustUnderstand,
+            "no-transform" => Self::NoTransform,
+            "immutable" => Self::Immutable,
+            "stale-while-revalidate" => Self::StaleWhileRevalidate,
+            "stale-if-error" => Self::StaleIfError,
+            "only-if-cached" => Self::OnlyIfCached,
+            _ => Self::Unknown(s),
+        }
+    }
+}
+
+impl fmt::Display for DirectiveKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for DirectiveKey {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for DirectiveKey {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
 
 /// Cache control directive value type
 #[derive(Debug)]
@@ -79,6 +233,51 @@ impl DirectiveValue {
             }
         }
     }
+
+    /// Parse the [DirectiveValue] as delta seconds, permitting a fractional component.
+    ///
+    /// Values with a fractional part are rounded down (floored) to the nearest
+    /// non-negative integer: e.g. `1.9` -> `1`, `0.5` -> `0`. This is useful
+    /// for compatibility with upstreams that emit fractional ttls (which
+    /// RFC 9111 strict integer parsing rejects).
+    ///
+    /// Integer parsing is attempted first, so strictly-numeric values (including
+    /// overflow-capped values and quoted integers) behave identically to
+    /// [Self::parse_as_delta_seconds]. Negative, non-finite, or non-numeric
+    /// values still return an error.
+    ///
+    /// `"`s are ignored. The value is capped to [DELTA_SECONDS_OVERFLOW_VALUE].
+    pub fn parse_as_delta_seconds_floor(&self) -> Result<u32> {
+        // UTF-8 validate once; on non-UTF8 input, propagate the same error as
+        // [Self::parse_as_delta_seconds].
+        let s = self.parse_as_str()?;
+        match s.parse::<u32>() {
+            Ok(value) => Ok(value),
+            Err(e) if e.kind() == &IntErrorKind::PosOverflow => Ok(DELTA_SECONDS_OVERFLOW_VALUE),
+            Err(int_err) => {
+                // Fall back to parsing as a non-negative finite float and floor.
+                // On any failure, return an error equivalent to the strict
+                // [Self::parse_as_delta_seconds] u32-parse error.
+                match s.parse::<f64>() {
+                    Ok(f) if f.is_finite() && f >= 0.0 => {
+                        if f >= DELTA_SECONDS_OVERFLOW_VALUE as f64 {
+                            Ok(DELTA_SECONDS_OVERFLOW_VALUE)
+                        } else {
+                            // Safe cast: `f` is finite, non-negative, and strictly
+                            // less than `DELTA_SECONDS_OVERFLOW_VALUE` (i32::MAX),
+                            // which fits in `u32` after flooring.
+                            Ok(f.floor() as u32)
+                        }
+                    }
+                    _ => Error::e_because(
+                        ErrorType::InternalError,
+                        "could not parse value as u32",
+                        int_err,
+                    ),
+                }
+            }
+        }
+    }
 }
 
 /// An ordered map to store cache control key value pairs.
@@ -89,6 +288,15 @@ pub type DirectiveMap = IndexMap<DirectiveKey, Option<DirectiveValue>>;
 pub struct CacheControl {
     /// The parsed directives
     pub directives: DirectiveMap,
+    /// When set, delta-seconds directives (`max-age`, `s-maxage`,
+    /// `stale-while-revalidate`, `stale-if-error`) accept fractional values
+    /// and round them down to the nearest non-negative integer.
+    ///
+    /// Defaults to `false`, matching RFC 9111 strict integer parsing. Enable
+    /// via [CacheControl::with_float_seconds] (or by assigning the field
+    /// directly) for contexts that need to interoperate with upstreams that
+    /// emit fractional ttls.
+    pub allow_float_seconds: bool,
 }
 
 /// Cacheability calculated from cache control.
@@ -168,11 +376,13 @@ impl CacheControl {
         for line in headers {
             for captures in RE_CACHE_DIRECTIVE.captures_iter(line.as_bytes()) {
                 // directive key
-                // header values don't have to be utf-8, but we store keys as strings for case-insensitive hashing
+                // header values don't have to be utf-8, but we store keys as
+                // strings for case-insensitive matching. Known directive names
+                // are mapped to enum variants (zero allocation).
                 let key = captures.get(1).and_then(|cap| {
                     str::from_utf8(cap.as_bytes())
                         .ok()
-                        .map(|token| token.to_lowercase())
+                        .map(|token| DirectiveKey::from_lowercase_owned(token.to_lowercase()))
                 });
                 if key.is_none() {
                     continue;
@@ -185,7 +395,20 @@ impl CacheControl {
                 directives.insert(key.unwrap(), value);
             }
         }
-        Some(CacheControl { directives })
+        Some(CacheControl {
+            directives,
+            allow_float_seconds: false,
+        })
+    }
+
+    /// Builder setter: enable fractional delta-seconds parsing.
+    ///
+    /// See [CacheControl::allow_float_seconds] for semantics. Returns `self`
+    /// so it can be chained onto a parser call, e.g.
+    /// `CacheControl::from_resp_headers(&resp).map(|cc| cc.with_float_seconds())`.
+    pub fn with_float_seconds(mut self) -> Self {
+        self.allow_float_seconds = true;
+        self
     }
 
     /// Parse from the given header name in `headers`
@@ -218,17 +441,30 @@ impl CacheControl {
     }
 
     /// Whether the given directive is in the cache control.
+    ///
+    /// Accepts a string for convenience; known directive names are matched
+    /// without allocation. Prefer [`has_directive`](Self::has_directive) when
+    /// you already have a [`DirectiveKey`].
+    ///
+    /// **Note:** `key` must already be lowercase (e.g. `"max-age"`, not
+    /// `"Max-Age"`). Directive names are stored in wire-format lowercase;
+    /// a mixed-case input will silently miss.
     pub fn has_key(&self, key: &str) -> bool {
+        self.has_directive(&DirectiveKey::from_lowercase(key))
+    }
+
+    /// Whether the given [`DirectiveKey`] is in the cache control.
+    pub fn has_directive(&self, key: &DirectiveKey) -> bool {
         self.directives.contains_key(key)
     }
 
     /// Whether the `public` directive is in the cache control.
     pub fn public(&self) -> bool {
-        self.has_key("public")
+        self.has_directive(&DirectiveKey::Public)
     }
 
     /// Whether the given directive exists, and it has no value.
-    fn has_key_without_value(&self, key: &str) -> bool {
+    fn has_key_without_value(&self, key: &DirectiveKey) -> bool {
         matches!(self.directives.get(key), Some(None))
     }
 
@@ -239,40 +475,42 @@ impl CacheControl {
     // It must be a boolean form (no value) to apply to the whole response.
     // https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.6
     pub fn private(&self) -> bool {
-        self.has_key_without_value("private")
+        self.has_key_without_value(&DirectiveKey::Private)
     }
 
-    fn get_field_names(&self, key: &str) -> Option<ListValueIter> {
-        if let Some(Some(value)) = self.directives.get(key) {
-            Some(ListValueIter::from(value))
-        } else {
-            None
-        }
+    fn get_field_names(&self, key: &DirectiveKey) -> Option<ListValueIter<'_>> {
+        let value = self.directives.get(key)?.as_ref()?;
+        Some(ListValueIter::from(value))
     }
 
     /// Get the values of `private=`
-    pub fn private_field_names(&self) -> Option<ListValueIter> {
-        self.get_field_names("private")
+    pub fn private_field_names(&self) -> Option<ListValueIter<'_>> {
+        self.get_field_names(&DirectiveKey::Private)
     }
 
     /// Whether the standalone `no-cache` exists in the cache control
     pub fn no_cache(&self) -> bool {
-        self.has_key_without_value("no-cache")
+        self.has_key_without_value(&DirectiveKey::NoCache)
     }
 
     /// Get the values of `no-cache=`
-    pub fn no_cache_field_names(&self) -> Option<ListValueIter> {
-        self.get_field_names("no-cache")
+    pub fn no_cache_field_names(&self) -> Option<ListValueIter<'_>> {
+        self.get_field_names(&DirectiveKey::NoCache)
     }
 
     /// Whether `no-store` exists.
     pub fn no_store(&self) -> bool {
-        self.has_key("no-store")
+        self.has_directive(&DirectiveKey::NoStore)
     }
 
-    fn parse_delta_seconds(&self, key: &str) -> Result<Option<u32>> {
+    fn parse_delta_seconds(&self, key: &DirectiveKey) -> Result<Option<u32>> {
         if let Some(Some(dir_value)) = self.directives.get(key) {
-            Ok(Some(dir_value.parse_as_delta_seconds()?))
+            let value = if self.allow_float_seconds {
+                dir_value.parse_as_delta_seconds_floor()?
+            } else {
+                dir_value.parse_as_delta_seconds()?
+            };
+            Ok(Some(value))
         } else {
             Ok(None)
         }
@@ -280,37 +518,37 @@ impl CacheControl {
 
     /// Return the `max-age` seconds
     pub fn max_age(&self) -> Result<Option<u32>> {
-        self.parse_delta_seconds("max-age")
+        self.parse_delta_seconds(&DirectiveKey::MaxAge)
     }
 
     /// Return the `s-maxage` seconds
     pub fn s_maxage(&self) -> Result<Option<u32>> {
-        self.parse_delta_seconds("s-maxage")
+        self.parse_delta_seconds(&DirectiveKey::SMaxAge)
     }
 
     /// Return the `stale-while-revalidate` seconds
     pub fn stale_while_revalidate(&self) -> Result<Option<u32>> {
-        self.parse_delta_seconds("stale-while-revalidate")
+        self.parse_delta_seconds(&DirectiveKey::StaleWhileRevalidate)
     }
 
     /// Return the `stale-if-error` seconds
     pub fn stale_if_error(&self) -> Result<Option<u32>> {
-        self.parse_delta_seconds("stale-if-error")
+        self.parse_delta_seconds(&DirectiveKey::StaleIfError)
     }
 
     /// Whether `must-revalidate` exists.
     pub fn must_revalidate(&self) -> bool {
-        self.has_key("must-revalidate")
+        self.has_directive(&DirectiveKey::MustRevalidate)
     }
 
     /// Whether `proxy-revalidate` exists.
     pub fn proxy_revalidate(&self) -> bool {
-        self.has_key("proxy-revalidate")
+        self.has_directive(&DirectiveKey::ProxyRevalidate)
     }
 
     /// Whether `only-if-cached` exists.
     pub fn only_if_cached(&self) -> bool {
-        self.has_key("only-if-cached")
+        self.has_directive(&DirectiveKey::OnlyIfCached)
     }
 }
 
@@ -319,7 +557,10 @@ impl InterpretCacheControl for CacheControl {
         if self.no_store() || self.private() {
             return Cacheable::No;
         }
-        if self.has_key("s-maxage") || self.has_key("max-age") || self.public() {
+        if self.has_directive(&DirectiveKey::SMaxAge)
+            || self.has_directive(&DirectiveKey::MaxAge)
+            || self.public()
+        {
             return Cacheable::Yes;
         }
         Cacheable::Default
@@ -329,39 +570,47 @@ impl InterpretCacheControl for CacheControl {
         // RFC 7234 https://datatracker.ietf.org/doc/html/rfc7234#section-3
         // "MUST NOT" store requests with Authorization header
         // unless response contains one of these directives
-        self.must_revalidate() || self.public() || self.has_key("s-maxage")
+        self.must_revalidate() || self.public() || self.has_directive(&DirectiveKey::SMaxAge)
     }
 
-    fn fresh_sec(&self) -> Option<u32> {
+    fn fresh_duration(&self) -> Option<Duration> {
         if self.no_cache() {
             // always treated as stale
-            return Some(0);
+            return Some(Duration::ZERO);
         }
-        match self.s_maxage() {
-            Ok(Some(seconds)) => Some(seconds),
+        let seconds = self
+            .s_maxage()
+            .ok()?
             // s-maxage not present
-            Ok(None) => match self.max_age() {
-                Ok(Some(seconds)) => Some(seconds),
-                _ => None,
-            },
-            _ => None,
-        }
+            .or_else(|| self.max_age().unwrap_or(None))
+            .map(|duration| Duration::from_secs(duration as u64))?;
+        Some(seconds)
     }
 
-    fn serve_stale_while_revalidate_sec(&self) -> Option<u32> {
+    fn serve_stale_while_revalidate_duration(&self) -> Option<Duration> {
         // RFC 7234: these directives forbid serving stale.
         // https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.4
-        if self.must_revalidate() || self.proxy_revalidate() || self.has_key("s-maxage") {
-            return Some(0);
+        if self.must_revalidate()
+            || self.proxy_revalidate()
+            || self.has_directive(&DirectiveKey::SMaxAge)
+        {
+            return Some(Duration::ZERO);
         }
-        self.stale_while_revalidate().unwrap_or(None)
+        self.stale_while_revalidate()
+            .unwrap_or(None)
+            .map(|secs| Duration::from_secs(secs as u64))
     }
 
-    fn serve_stale_if_error_sec(&self) -> Option<u32> {
-        if self.must_revalidate() || self.proxy_revalidate() || self.has_key("s-maxage") {
-            return Some(0);
+    fn serve_stale_if_error_duration(&self) -> Option<Duration> {
+        if self.must_revalidate()
+            || self.proxy_revalidate()
+            || self.has_directive(&DirectiveKey::SMaxAge)
+        {
+            return Some(Duration::ZERO);
         }
-        self.stale_if_error().unwrap_or(None)
+        self.stale_if_error()
+            .unwrap_or(None)
+            .map(|secs| Duration::from_secs(secs as u64))
     }
 
     // Strip header names listed in `private` or `no-cache` directives from a response.
@@ -408,9 +657,9 @@ pub trait InterpretCacheControl {
 
     /// Returns freshness ttl specified in cache-control
     ///
-    /// - `Some(_)` indicates cache-control specifies a valid ttl. Some(0) = always stale.
+    /// - `Some(_)` indicates cache-control specifies a valid ttl. Some(Duration::ZERO) = always stale.
     /// - `None` means cache-control did not specify a valid ttl.
-    fn fresh_sec(&self) -> Option<u32>;
+    fn fresh_duration(&self) -> Option<Duration>;
 
     /// Returns stale-while-revalidate ttl,
     ///
@@ -420,7 +669,7 @@ pub trait InterpretCacheControl {
     /// or `stale-while-revalidater=0`.
     ///
     /// `None` indicates no SWR ttl was specified.
-    fn serve_stale_while_revalidate_sec(&self) -> Option<u32>;
+    fn serve_stale_while_revalidate_duration(&self) -> Option<Duration>;
 
     /// Returns stale-if-error ttl,
     ///
@@ -430,7 +679,7 @@ pub trait InterpretCacheControl {
     /// or `stale-if-error=0`.
     ///
     /// `None` indicates no SIE ttl was specified.
-    fn serve_stale_if_error_sec(&self) -> Option<u32>;
+    fn serve_stale_if_error_duration(&self) -> Option<Duration>;
 
     /// Strip header names listed in `private` or `no-cache` directives from a response,
     /// usually prior to storing that response in cache.
@@ -644,16 +893,16 @@ mod tests {
     fn test_fresh_sec() {
         let resp = build_response(CACHE_CONTROL, "");
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
-        assert!(cc.fresh_sec().is_none());
+        assert!(cc.fresh_duration().is_none());
 
         let resp = build_response(CACHE_CONTROL, "max-age=12345");
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
-        assert_eq!(cc.fresh_sec().unwrap(), 12345);
+        assert_eq!(cc.fresh_duration().unwrap(), Duration::from_secs(12345));
 
         let resp = build_response(CACHE_CONTROL, "max-age=99999,s-maxage=123");
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
         // prefer s-maxage over max-age
-        assert_eq!(cc.fresh_sec().unwrap(), 123);
+        assert_eq!(cc.fresh_duration().unwrap(), Duration::from_secs(123));
     }
 
     #[test]
@@ -686,7 +935,7 @@ mod tests {
         let resp = build_response(CACHE_CONTROL, "no-cache, max-age=12345");
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
         assert_eq!(cc.is_cacheable(), Cacheable::Yes);
-        assert_eq!(cc.fresh_sec().unwrap(), 0);
+        assert_eq!(cc.fresh_duration().unwrap(), Duration::ZERO);
     }
 
     #[test]
@@ -695,7 +944,7 @@ mod tests {
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
         assert!(!cc.private());
         assert_eq!(cc.is_cacheable(), Cacheable::Yes);
-        assert_eq!(cc.fresh_sec().unwrap(), 12345);
+        assert_eq!(cc.fresh_duration().unwrap(), Duration::from_secs(12345));
         let mut field_names = cc.no_cache_field_names().unwrap();
         assert_eq!(
             str::from_utf8(field_names.next().unwrap()).unwrap(),
@@ -750,8 +999,11 @@ mod tests {
         let resp = build_response(CACHE_CONTROL, "max-age=12345, stale-while-revalidate=5");
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
         assert_eq!(cc.stale_while_revalidate().unwrap().unwrap(), 5);
-        assert_eq!(cc.serve_stale_while_revalidate_sec().unwrap(), 5);
-        assert!(cc.serve_stale_if_error_sec().is_none());
+        assert_eq!(
+            cc.serve_stale_while_revalidate_duration().unwrap(),
+            Duration::from_secs(5)
+        );
+        assert!(cc.serve_stale_if_error_duration().is_none());
     }
 
     #[test]
@@ -759,8 +1011,11 @@ mod tests {
         let resp = build_response(CACHE_CONTROL, "max-age=12345, stale-if-error=3600");
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
         assert_eq!(cc.stale_if_error().unwrap().unwrap(), 3600);
-        assert_eq!(cc.serve_stale_if_error_sec().unwrap(), 3600);
-        assert!(cc.serve_stale_while_revalidate_sec().is_none());
+        assert_eq!(
+            cc.serve_stale_if_error_duration().unwrap(),
+            Duration::from_secs(3600)
+        );
+        assert!(cc.serve_stale_while_revalidate_duration().is_none());
     }
 
     #[test]
@@ -773,8 +1028,11 @@ mod tests {
         assert!(cc.must_revalidate());
         assert_eq!(cc.stale_while_revalidate().unwrap().unwrap(), 60);
         assert_eq!(cc.stale_if_error().unwrap().unwrap(), 30);
-        assert_eq!(cc.serve_stale_while_revalidate_sec().unwrap(), 0);
-        assert_eq!(cc.serve_stale_if_error_sec().unwrap(), 0);
+        assert_eq!(
+            cc.serve_stale_while_revalidate_duration().unwrap(),
+            Duration::ZERO
+        );
+        assert_eq!(cc.serve_stale_if_error_duration().unwrap(), Duration::ZERO);
     }
 
     #[test]
@@ -787,8 +1045,11 @@ mod tests {
         assert!(cc.proxy_revalidate());
         assert_eq!(cc.stale_while_revalidate().unwrap().unwrap(), 60);
         assert_eq!(cc.stale_if_error().unwrap().unwrap(), 30);
-        assert_eq!(cc.serve_stale_while_revalidate_sec().unwrap(), 0);
-        assert_eq!(cc.serve_stale_if_error_sec().unwrap(), 0);
+        assert_eq!(
+            cc.serve_stale_while_revalidate_duration().unwrap(),
+            Duration::ZERO
+        );
+        assert_eq!(cc.serve_stale_if_error_duration().unwrap(), Duration::ZERO);
     }
 
     #[test]
@@ -800,8 +1061,11 @@ mod tests {
         let cc = CacheControl::from_resp_headers(&resp).unwrap();
         assert_eq!(cc.stale_while_revalidate().unwrap().unwrap(), 60);
         assert_eq!(cc.stale_if_error().unwrap().unwrap(), 30);
-        assert_eq!(cc.serve_stale_while_revalidate_sec().unwrap(), 0);
-        assert_eq!(cc.serve_stale_if_error_sec().unwrap(), 0);
+        assert_eq!(
+            cc.serve_stale_while_revalidate_duration().unwrap(),
+            Duration::ZERO
+        );
+        assert_eq!(cc.serve_stale_if_error_duration().unwrap(), Duration::ZERO);
     }
 
     #[test]
@@ -841,5 +1105,169 @@ mod tests {
         let req = build_request(CACHE_CONTROL, "only-if-cached=1");
         let cc = CacheControl::from_req_headers(&req).unwrap();
         assert!(cc.only_if_cached())
+    }
+
+    #[test]
+    fn test_parse_as_delta_seconds_floor() {
+        // Integer values behave identically to the strict parser
+        let v = DirectiveValue(b"10".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 10);
+
+        let v = DirectiveValue(b"\"10\"".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 10);
+
+        // Quoted fractional values are unwrapped by parse_as_str and floored.
+        let v = DirectiveValue(b"\"1.5\"".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 1);
+
+        let v = DirectiveValue(b"0".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 0);
+
+        // Integer positive overflow is still capped
+        let v = DirectiveValue(b"99999999999999999999".to_vec());
+        assert_eq!(
+            v.parse_as_delta_seconds_floor().unwrap(),
+            DELTA_SECONDS_OVERFLOW_VALUE
+        );
+
+        // Floats are floored
+        let v = DirectiveValue(b"1.5".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 1);
+
+        let v = DirectiveValue(b"1.9".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 1);
+
+        let v = DirectiveValue(b"0.5".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 0);
+
+        let v = DirectiveValue(b"3600.0".to_vec());
+        assert_eq!(v.parse_as_delta_seconds_floor().unwrap(), 3600);
+
+        // Float positive overflow is capped
+        let v = DirectiveValue(b"99999999999.5".to_vec());
+        assert_eq!(
+            v.parse_as_delta_seconds_floor().unwrap(),
+            DELTA_SECONDS_OVERFLOW_VALUE
+        );
+
+        // Negative values are rejected (matches strict behavior)
+        assert!(DirectiveValue(b"-1".to_vec())
+            .parse_as_delta_seconds_floor()
+            .is_err());
+        assert!(DirectiveValue(b"-1.5".to_vec())
+            .parse_as_delta_seconds_floor()
+            .is_err());
+
+        // Non-finite / non-numeric values are rejected
+        assert!(DirectiveValue(b"NaN".to_vec())
+            .parse_as_delta_seconds_floor()
+            .is_err());
+        assert!(DirectiveValue(b"inf".to_vec())
+            .parse_as_delta_seconds_floor()
+            .is_err());
+        assert!(DirectiveValue(b"abc".to_vec())
+            .parse_as_delta_seconds_floor()
+            .is_err());
+
+        // Non-UTF8 bytes are rejected with the same utf-8 error as the strict parser.
+        let v = DirectiveValue(b"ba\xFFr".to_vec());
+        assert_eq!(
+            v.parse_as_delta_seconds_floor()
+                .unwrap_err()
+                .context
+                .unwrap()
+                .to_string(),
+            "could not parse value as utf8",
+        );
+    }
+
+    #[test]
+    fn test_cache_control_allow_float_seconds_non_utf8_value() {
+        // Non-UTF8 bytes inside `max-age` should still produce the utf-8 error
+        // when the float-permitting flag is on, matching the strict parser.
+        let mut resp = response::Builder::new().body(()).unwrap();
+        resp.headers_mut().insert(
+            CACHE_CONTROL,
+            HeaderValue::from_bytes(b"max-age=ba\xFFr").unwrap(),
+        );
+        let (parts, _) = resp.into_parts();
+        let cc = CacheControl::from_resp_headers(&parts)
+            .unwrap()
+            .with_float_seconds();
+        assert_eq!(
+            cc.max_age().unwrap_err().context.unwrap().to_string(),
+            "could not parse value as utf8",
+        );
+    }
+
+    #[test]
+    fn test_cache_control_allow_float_seconds_default_off() {
+        // Default (strict) parsing: fractional values produce an error, and
+        // [InterpretCacheControl::fresh_duration] returns None, matching the
+        // pre-existing behavior.
+        let resp = build_response(CACHE_CONTROL, "max-age=10.7");
+        let cc = CacheControl::from_resp_headers(&resp).unwrap();
+        assert!(!cc.allow_float_seconds);
+        assert!(cc.max_age().is_err());
+        assert!(cc.fresh_duration().is_none());
+    }
+
+    #[test]
+    fn test_cache_control_with_float_seconds() {
+        // `max-age` with a fractional value is floored when the flag is on.
+        let resp = build_response(CACHE_CONTROL, "max-age=10.7");
+        let cc = CacheControl::from_resp_headers(&resp)
+            .unwrap()
+            .with_float_seconds();
+        assert!(cc.allow_float_seconds);
+        assert_eq!(cc.max_age().unwrap().unwrap(), 10);
+        assert_eq!(cc.fresh_duration().unwrap(), Duration::from_secs(10));
+
+        // `s-maxage` still wins over `max-age` and is also floored.
+        let resp = build_response(CACHE_CONTROL, "s-maxage=3600.99, max-age=1800");
+        let cc = CacheControl::from_resp_headers(&resp)
+            .unwrap()
+            .with_float_seconds();
+        assert_eq!(cc.s_maxage().unwrap().unwrap(), 3600);
+        assert_eq!(cc.fresh_duration().unwrap(), Duration::from_secs(3600));
+
+        // `stale-while-revalidate` and `stale-if-error` also pick up flooring.
+        let resp = build_response(
+            CACHE_CONTROL,
+            "max-age=10, stale-while-revalidate=60.5, stale-if-error=30.9",
+        );
+        let cc = CacheControl::from_resp_headers(&resp)
+            .unwrap()
+            .with_float_seconds();
+        assert_eq!(cc.stale_while_revalidate().unwrap().unwrap(), 60);
+        assert_eq!(cc.stale_if_error().unwrap().unwrap(), 30);
+        assert_eq!(
+            cc.serve_stale_while_revalidate_duration().unwrap(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            cc.serve_stale_if_error_duration().unwrap(),
+            Duration::from_secs(30)
+        );
+
+        // Integer values are unaffected when the flag is on.
+        let resp = build_response(CACHE_CONTROL, "max-age=12345");
+        let cc = CacheControl::from_resp_headers(&resp)
+            .unwrap()
+            .with_float_seconds();
+        assert_eq!(cc.fresh_duration().unwrap(), Duration::from_secs(12345));
+
+        // Invalid (non-numeric, negative) values still fail to parse under the flag.
+        let resp = build_response(CACHE_CONTROL, "max-age=abc");
+        let cc = CacheControl::from_resp_headers(&resp)
+            .unwrap()
+            .with_float_seconds();
+        assert!(cc.max_age().is_err());
+
+        let resp = build_response(CACHE_CONTROL, "max-age=-1.5");
+        let cc = CacheControl::from_resp_headers(&resp)
+            .unwrap()
+            .with_float_seconds();
+        assert!(cc.max_age().is_err());
     }
 }

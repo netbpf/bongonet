@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,8 +13,6 @@
 // limitations under the License.
 
 //! Cache key
-
-use super::*;
 
 use blake2::{Blake2b, Digest};
 use http::Extensions;
@@ -94,12 +92,23 @@ pub trait CacheHashKey {
     }
 }
 
-/// General purpose cache key
+/// General purpose cache key.
+///
+/// The primary hash is computed over the exact bytes supplied to [`CacheKey::new`].
+/// Callers that combine multiple logical components, such as a namespace and URL,
+/// must encode their boundaries unambiguously before constructing the key.
+///
+/// # Migration
+///
+/// The former `namespace` argument has been removed. Concatenating the old namespace
+/// and primary bytes preserves the legacy hash, but also preserves its ambiguous
+/// component boundaries. Switching to an unambiguous encoding changes hashes for
+/// keys with a non-empty namespace, so callers should expect a cold cache.
 #[derive(Debug, Clone)]
 pub struct CacheKey {
-    // All strings for now. It can be more structural as long as it can hash
-    namespace: String,
-    primary: String,
+    // Primary is essentially a string, except it allows invalid UTF-8 sequences.
+    // This field should be able to be hashed.
+    primary: Vec<u8>,
     primary_bin_override: Option<HashBinary>,
     variance: Option<HashBinary>,
     /// An extra tag for identifying users
@@ -131,11 +140,16 @@ impl CacheKey {
     pub fn set_primary_bin_override(&mut self, key: HashBinary) {
         self.primary_bin_override = Some(key)
     }
+
+    /// Try to get primary key as UTF-8 str, if valid
+    pub fn primary_key_str(&self) -> Option<&str> {
+        std::str::from_utf8(&self.primary).ok()
+    }
 }
 
 /// Storage optimized cache key to keep in memory or in storage
 // 16 bytes + 8 bytes (+16 * u8) + user_tag.len() + 16 Bytes (Box<str>)
-#[derive(Debug, Deserialize, Serialize, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CompactCacheKey {
     pub primary: HashBinary,
     // save 8 bytes for non-variance but waste 8 bytes for variance vs, store flat 16 bytes
@@ -173,7 +187,7 @@ impl CacheHashKey for CompactCacheKey {
  * use because hashing performance is not critical.
  * Note: we should avoid hashes like ahash which does not have consistent output
  * across machines because it is designed purely for in memory hashtable
-*/
+ */
 
 // hash output: we use 128 bits (16 bytes) hash which will map to 32 bytes hex string
 pub(crate) type Blake2b128 = Blake2b<blake2::digest::consts::U16>;
@@ -186,10 +200,10 @@ pub fn hash_u8(key: &str) -> u8 {
     raw[0]
 }
 
-/// helper function: hash str to [HashBinary]
-pub fn hash_key(key: &str) -> HashBinary {
+/// helper function: hash key (String or Bytes) to [HashBinary]
+pub fn hash_key<K: AsRef<[u8]>>(key: K) -> HashBinary {
     let mut hasher = Blake2b128::new();
-    hasher.update(key);
+    hasher.update(key.as_ref());
     let raw = hasher.finalize();
     raw.into()
 }
@@ -197,34 +211,21 @@ pub fn hash_key(key: &str) -> HashBinary {
 impl CacheKey {
     fn primary_hasher(&self) -> Blake2b128 {
         let mut hasher = Blake2b128::new();
-        hasher.update(&self.namespace);
         hasher.update(&self.primary);
         hasher
     }
 
-    /// Create a default [CacheKey] from a request, which just takes it URI as the primary key.
-    pub fn default(req_header: &ReqHeader) -> Self {
-        CacheKey {
-            namespace: "".into(),
-            primary: format!("{}", req_header.uri),
-            primary_bin_override: None,
-            variance: None,
-            user_tag: "".into(),
-            extensions: Extensions::new(),
-        }
-    }
-
-    /// Create a new [CacheKey] from the given namespace, primary, and user_tag string.
+    /// Create a new [CacheKey] from the given `primary` key and `user_tag`.
     ///
-    /// Both `namespace` and `primary` will be used for the primary hash
-    pub fn new<S1, S2, S3>(namespace: S1, primary: S2, user_tag: S3) -> Self
+    /// Only the `primary` key will be hashed to produce the primary cache hash.
+    /// If the primary contains multiple logical components, callers must frame
+    /// them unambiguously, for example by length-prefixing each component.
+    pub fn new<B, S>(primary: B, user_tag: S) -> Self
     where
-        S1: Into<String>,
-        S2: Into<String>,
-        S3: Into<String>,
+        B: Into<Vec<u8>>,
+        S: Into<String>,
     {
         CacheKey {
-            namespace: namespace.into(),
             primary: primary.into(),
             primary_bin_override: None,
             variance: None,
@@ -233,14 +234,9 @@ impl CacheKey {
         }
     }
 
-    /// Return the namespace of this key
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
     /// Return the primary key of this key
-    pub fn primary_key(&self) -> &str {
-        &self.primary
+    pub fn primary_key(&self) -> &[u8] {
+        &self.primary[..]
     }
 
     /// Convert this key to [CompactCacheKey].
@@ -278,14 +274,7 @@ mod tests {
 
     #[test]
     fn test_cache_key_hash() {
-        let key = CacheKey {
-            namespace: "".into(),
-            primary: "aa".into(),
-            primary_bin_override: None,
-            variance: None,
-            user_tag: "1".into(),
-            extensions: Extensions::new(),
-        };
+        let key = CacheKey::new("aa", "1");
         let hash = key.primary();
         assert_eq!(hash, "ac10f2aef117729f8dad056b3059eb7e");
         assert!(key.variance().is_none());
@@ -297,10 +286,40 @@ mod tests {
     }
 
     #[test]
+    fn test_caller_framed_primary_avoids_ambiguous_component_boundaries() {
+        let left_components = [b"tenant_a".as_slice(), b"/path".as_slice()];
+        let right_components = [b"tenant_".as_slice(), b"a/path".as_slice()];
+        let legacy_primary = left_components.concat();
+        assert_eq!(legacy_primary, right_components.concat());
+
+        fn length_prefixed(components: &[&[u8]]) -> Vec<u8> {
+            let mut primary = Vec::new();
+            for component in components {
+                primary.extend_from_slice(&(component.len() as u64).to_be_bytes());
+                primary.extend_from_slice(component);
+            }
+            primary
+        }
+
+        let left = CacheKey::new(length_prefixed(&left_components), "1");
+        let right = CacheKey::new(length_prefixed(&right_components), "1");
+        assert_ne!(left.primary_bin(), right.primary_bin());
+        assert_ne!(left.primary_bin(), hash_key(legacy_primary));
+    }
+
+    #[test]
+    fn test_raw_concatenation_preserves_legacy_hash() {
+        let mut primary = b"tenant_a".to_vec();
+        primary.extend_from_slice(b"/path");
+
+        let key = CacheKey::new(primary, "1");
+        assert_eq!(key.primary(), "6c79e74e88bacb8eb370adb7617068c8");
+    }
+
+    #[test]
     fn test_cache_key_hash_override() {
         let mut key = CacheKey {
-            namespace: "".into(),
-            primary: "aa".into(),
+            primary: b"aa".to_vec(),
             primary_bin_override: str2hex("27c35e6e9373877f29e562464e46497e"),
             variance: None,
             user_tag: "1".into(),
@@ -330,8 +349,7 @@ mod tests {
     #[test]
     fn test_cache_key_vary_hash() {
         let key = CacheKey {
-            namespace: "".into(),
-            primary: "aa".into(),
+            primary: b"aa".to_vec(),
             primary_bin_override: None,
             variance: Some([0u8; 16]),
             user_tag: "1".into(),
@@ -353,8 +371,7 @@ mod tests {
     #[test]
     fn test_cache_key_vary_hash_override() {
         let key = CacheKey {
-            namespace: "".into(),
-            primary: "saaaad".into(),
+            primary: b"saaaad".to_vec(),
             primary_bin_override: str2hex("ac10f2aef117729f8dad056b3059eb7e"),
             variance: Some([0u8; 16]),
             user_tag: "1".into(),
@@ -385,5 +402,33 @@ mod tests {
         for i in 0..KEY_SIZE {
             assert_eq!(key[i], key2[i]);
         }
+    }
+    #[test]
+    fn test_primary_key_str_valid_utf8() {
+        let valid_utf8_key = CacheKey {
+            primary: b"/valid/path?query=1".to_vec(),
+            primary_bin_override: None,
+            variance: None,
+            user_tag: "1".into(),
+            extensions: Extensions::new(),
+        };
+
+        assert_eq!(
+            valid_utf8_key.primary_key_str(),
+            Some("/valid/path?query=1")
+        )
+    }
+
+    #[test]
+    fn test_primary_key_str_invalid_utf8() {
+        let invalid_utf8_key = CacheKey {
+            primary: vec![0x66, 0x6f, 0x6f, 0xff],
+            primary_bin_override: None,
+            variance: None,
+            user_tag: "1".into(),
+            extensions: Extensions::new(),
+        };
+
+        assert!(invalid_utf8_key.primary_key_str().is_none())
     }
 }

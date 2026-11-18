@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,9 +19,10 @@ use crate::cache_control::{CacheControl, Cacheable, InterpretCacheControl};
 use crate::RespCacheable::*;
 
 use bongonet_http::RequestHeader;
+use cache_control::DELTA_SECONDS_OVERFLOW_VALUE;
 use http::{header, HeaderValue};
 use httpdate::HttpDate;
-use log::warn;
+use log::debug;
 
 /// Decide if the request can be cacheable
 pub fn request_cacheable(req_header: &ReqHeader) -> bool {
@@ -48,8 +49,8 @@ pub fn resp_cacheable(
         defaults,
     );
     if let Some(fresh_until) = expire_time {
-        let (stale_while_revalidate_sec, stale_if_error_sec) =
-            calculate_serve_stale_sec(cache_control, defaults);
+        let (stale_while_revalidate_duration, stale_if_error_duration) =
+            calculate_serve_stale_durations(cache_control, defaults);
 
         if let Some(cc) = cache_control {
             cc.strip_private_headers(&mut resp_header);
@@ -57,8 +58,8 @@ pub fn resp_cacheable(
         return Cacheable(CacheMeta::new(
             fresh_until,
             now,
-            stale_while_revalidate_sec,
-            stale_if_error_sec,
+            stale_while_revalidate_duration,
+            stale_if_error_duration,
             resp_header,
         ));
     }
@@ -75,12 +76,12 @@ pub fn calculate_fresh_until(
     authorization_present: bool,
     defaults: &CacheMetaDefaults,
 ) -> Option<SystemTime> {
-    fn freshness_ttl_to_time(now: SystemTime, fresh_sec: u32) -> Option<SystemTime> {
-        if fresh_sec == 0 {
+    fn freshness_ttl_to_time(now: SystemTime, fresh: Duration) -> Option<SystemTime> {
+        if fresh.is_zero() {
             // ensure that the response is treated as stale
             now.checked_sub(Duration::from_secs(1))
         } else {
-            now.checked_add(Duration::from_secs(fresh_sec.into()))
+            now.checked_add(fresh)
         }
     }
 
@@ -88,7 +89,7 @@ pub fn calculate_fresh_until(
     if authorization_present {
         let uncacheable = cache_control
             .as_ref()
-            .map_or(true, |cc| !cc.allow_caching_authorized_req());
+            .is_none_or(|cc| !cc.allow_caching_authorized_req());
         if uncacheable {
             return None;
         }
@@ -96,7 +97,7 @@ pub fn calculate_fresh_until(
 
     let uncacheable = cache_control
         .as_ref()
-        .map_or(false, |cc| cc.is_cacheable() == Cacheable::No);
+        .is_some_and(|cc| cc.is_cacheable() == Cacheable::No);
     if uncacheable {
         return None;
     }
@@ -104,7 +105,7 @@ pub fn calculate_fresh_until(
     // For TTL check cache-control first, then expires header, then defaults
     cache_control
         .and_then(|cc| {
-            cc.fresh_sec()
+            cc.fresh_duration()
                 .and_then(|ttl| freshness_ttl_to_time(now, ttl))
         })
         .or_else(|| calculate_expires_header_time(resp_header))
@@ -127,7 +128,7 @@ pub fn calculate_expires_header_time(resp_header: &RespHeader) -> Option<SystemT
         Some(SystemTime::from(
             expires
                 .parse::<HttpDate>()
-                .map_err(|e| warn!("Invalid HttpDate in Expires: {}, error: {}", expires, e))
+                .map_err(|e| debug!("Invalid HttpDate in Expires: {}, error: {}", expires, e))
                 .ok()?,
         ))
     }
@@ -141,17 +142,26 @@ pub fn calculate_expires_header_time(resp_header: &RespHeader) -> Option<SystemT
 }
 
 /// Calculates stale-while-revalidate and stale-if-error seconds from Cache-Control or the [CacheMetaDefaults].
-pub fn calculate_serve_stale_sec(
+pub fn calculate_serve_stale_durations(
     cache_control: Option<&impl InterpretCacheControl>,
     defaults: &CacheMetaDefaults,
 ) -> (u32, u32) {
-    let serve_stale_while_revalidate_sec = cache_control
-        .and_then(|cc| cc.serve_stale_while_revalidate_sec())
-        .unwrap_or_else(|| defaults.serve_stale_while_revalidate_sec());
-    let serve_stale_if_error_sec = cache_control
-        .and_then(|cc| cc.serve_stale_if_error_sec())
-        .unwrap_or_else(|| defaults.serve_stale_if_error_sec());
-    (serve_stale_while_revalidate_sec, serve_stale_if_error_sec)
+    let serve_stale_while_revalidate = cache_control
+        .and_then(|cc| cc.serve_stale_while_revalidate_duration())
+        .unwrap_or_else(|| Duration::from_secs(defaults.serve_stale_while_revalidate_sec() as u64));
+    let serve_stale_if_error = cache_control
+        .and_then(|cc| cc.serve_stale_if_error_duration())
+        .unwrap_or_else(|| Duration::from_secs(defaults.serve_stale_if_error_sec() as u64));
+    (
+        serve_stale_while_revalidate
+            .as_secs()
+            .try_into()
+            .unwrap_or(DELTA_SECONDS_OVERFLOW_VALUE),
+        serve_stale_if_error
+            .as_secs()
+            .try_into()
+            .unwrap_or(DELTA_SECONDS_OVERFLOW_VALUE),
+    )
 }
 
 /// Filters to run when sending requests to upstream
@@ -167,7 +177,7 @@ pub mod upstream {
     ///
     /// When `meta` is set, this function will inject `If-modified-since` according to the `Last-Modified` header
     /// and inject `If-none-match` according to `Etag` header
-    pub fn request_filter(req: &mut RequestHeader, meta: Option<&CacheMeta>) -> Result<()> {
+    pub fn request_filter(req: &mut RequestHeader, meta: Option<&CacheMeta>) {
         // change HEAD to GET, HEAD itself is not semantically cacheable
         if req.method == Method::HEAD {
             req.set_method(Method::GET);
@@ -196,8 +206,6 @@ pub mod upstream {
                 req.insert_header(header::IF_NONE_MATCH, etag).unwrap();
             }
         }
-
-        Ok(())
     }
 }
 
@@ -214,14 +222,17 @@ mod tests {
     }
 
     const DEFAULTS: CacheMetaDefaults = CacheMetaDefaults::new(
-        |status| match status {
-            StatusCode::OK => Some(10),
-            StatusCode::NOT_FOUND => Some(5),
-            StatusCode::PARTIAL_CONTENT => None,
-            _ => Some(1),
+        |status| {
+            match status {
+                StatusCode::OK => Some(10),
+                StatusCode::NOT_FOUND => Some(5),
+                StatusCode::PARTIAL_CONTENT => None,
+                _ => Some(1),
+            }
+            .map(Duration::from_secs)
         },
         0,
-        u32::MAX, /* "infinite" stale-if-error */
+        DELTA_SECONDS_OVERFLOW_VALUE, /* "infinite" stale-if-error */
     );
 
     // Cache nothing, by default
@@ -514,11 +525,11 @@ mod tests {
         );
 
         let meta = meta.unwrap();
-        let hundred_years_time = SystemTime::now()
-            .checked_add(Duration::from_secs(86400 * 365 * 100))
+        let fifty_years_time = SystemTime::now()
+            .checked_add(Duration::from_secs(86400 * 365 * 50))
             .unwrap();
-        assert!(!meta.is_fresh(hundred_years_time));
-        assert!(meta.serve_stale_if_error(hundred_years_time));
+        assert!(!meta.is_fresh(fifty_years_time));
+        assert!(meta.serve_stale_if_error(fifty_years_time));
 
         // override with stale-if-error
         let meta = resp_cacheable_wrapper(
@@ -668,5 +679,26 @@ mod tests {
         let meta = meta.unwrap();
         assert!(!meta.headers().contains_key(SET_COOKIE));
         assert!(!meta.headers().contains_key("meta1"));
+    }
+
+    #[test]
+    fn test_upstream_request_filter_revalidates_with_if_modified_since() {
+        // revalidation sends Last-Modified as If-Modified-Since, so the origin can answer 304
+        let last_modified = "Wed, 21 Oct 2015 07:28:00 GMT";
+        let meta = resp_cacheable_wrapper(
+            build_response(200, &[(header::LAST_MODIFIED, last_modified)]),
+            &DEFAULTS,
+            false,
+        )
+        .unwrap();
+
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        upstream::request_filter(&mut req, Some(&meta));
+
+        assert_eq!(
+            req.headers.get(header::IF_MODIFIED_SINCE).unwrap(),
+            last_modified
+        );
+        assert!(!req.headers.contains_key(header::IF_UNMODIFIED_SINCE));
     }
 }

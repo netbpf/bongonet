@@ -35,6 +35,12 @@ impl<'a> VarianceBuilder<'a> {
         self.values.insert(name.into(), Cow::Owned(value));
     }
 
+    /// Move String name and byte string value to the variance key. Not sensitive to insertion order.
+    /// Useful when both the name and value are generated at runtime.
+    pub fn add_owned_name_value(&mut self, name: String, value: Vec<u8>) {
+        self.values.insert(Cow::Owned(name), Cow::Owned(value));
+    }
+
     /// Check whether this variance key actually has variance, or just refers to the root asset
     pub fn has_variance(&self) -> bool {
         !self.values.is_empty()
@@ -116,5 +122,19 @@ mod test {
         let key_b = key_b.finalize().unwrap();
 
         assert_eq!(key_a, key_b);
+    }
+
+    #[test]
+    fn test_value_differentiates_key() {
+        // the value is part of the key: gzip and br must not share a cached variant
+        let mut key_gzip = VarianceBuilder::new();
+        key_gzip.add_value("accept-encoding", "gzip");
+        let key_gzip = key_gzip.finalize().unwrap();
+
+        let mut key_br = VarianceBuilder::new();
+        key_br.add_value("accept-encoding", "br");
+        let key_br = key_br.finalize().unwrap();
+
+        assert_ne!(key_gzip, key_br);
     }
 }
