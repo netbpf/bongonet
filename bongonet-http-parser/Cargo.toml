@@ -1,0 +1,20 @@
+[package]
+name = "bongonet-http-parser"
+version = "0.4.0"
+authors = ["Md Sulaiman <ceo@khulnasoft.com>"]
+license = "Apache-2.0"
+edition = "2021"
+repository = "https://github.com/netbpf/bongonet"
+categories = ["network-programming", "parser-implementations"]
+keywords = ["http", "parser", "bongonet"]
+description = "HTTP/1 parser compatibility layer for Bongonet."
+
+[dependencies]
+httparse = { workspace = true }
+
+[features]
+default = []
+patched_http1 = []
+
+[lints]
+workspace = true
