@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -186,7 +186,6 @@ impl<S> SslStream<S> {
     }
 }
 
-#[cfg(feature = "read_uninit")]
 impl<S> AsyncRead for SslStream<S>
 where
     S: AsyncRead + AsyncWrite,
@@ -199,37 +198,6 @@ where
         self.with_context(ctx, |s| {
             // SAFETY: read_uninit does not de-initialize the buffer.
             match cvt(s.read_uninit(unsafe { buf.unfilled_mut() }))? {
-                Poll::Ready(nread) => {
-                    unsafe {
-                        buf.assume_init(nread);
-                    }
-                    buf.advance(nread);
-                    Poll::Ready(Ok(()))
-                }
-                Poll::Pending => Poll::Pending,
-            }
-        })
-    }
-}
-
-#[cfg(not(feature = "read_uninit"))]
-impl<S> AsyncRead for SslStream<S>
-where
-    S: AsyncRead + AsyncWrite,
-{
-    fn poll_read(
-        self: Pin<&mut Self>,
-        ctx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        self.with_context(ctx, |s| {
-            // This isn't really "proper", but rust-openssl doesn't currently expose a suitable interface even though
-            // OpenSSL itself doesn't require the buffer to be initialized. So this is good enough for now.
-            let slice = unsafe {
-                let buf = buf.unfilled_mut();
-                std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), buf.len())
-            };
-            match cvt(s.read(slice))? {
                 Poll::Ready(nread) => {
                     unsafe {
                         buf.assume_init(nread);
@@ -263,9 +231,7 @@ where
                 return Poll::Pending;
             }
             Err(e) => {
-                return Poll::Ready(Err(e
-                    .into_io_error()
-                    .unwrap_or_else(|e| io::Error::new(io::ErrorKind::Other, e))));
+                return Poll::Ready(Err(e.into_io_error().unwrap_or_else(io::Error::other)));
             }
         }
 
