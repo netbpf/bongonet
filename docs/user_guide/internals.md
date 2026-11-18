@@ -22,33 +22,47 @@ The bongonet system starts by spawning a *server*. The server is responsible for
 After spawning the *services*, the server continues to listen to a termination event, which it will propagate to the created services.
 
 ## Services
+flowchart TD
+       start([New request]) --> request_filter[Request filter]
+       request_filter -->|continue| upstream_peer[Select upstream peer]
+       request_filter -->|send response| logging[Log request]
 
-*Services* are entities that handle listening to given sockets, and perform the core functionality. A *service* is tied to a particular protocol and set of options.
+       subgraph upstream[Connect to upstream]
+              direction TD
+              upstream_peer --> connect{{Connect}}
+              connect -->|success| connected[Connected]
+              connect -->|failure| fail_to_connect[Connection failed]
+              connected --> upstream_request_filter[Upstream request filter]
+              upstream_request_filter --> send_request{{Send request}}
+              send_request -->|success| read_response{{Read response}}
+              read_response -->|success| upstream_response_filter[Upstream response filter]
+              upstream_response_filter --> response_filter[Response filter]
+              response_filter --> upstream_response_body_filter[Upstream response body filter]
+              upstream_response_body_filter --> response_body_filter[Response body filter]
+              response_body_filter --> logging
+       end
 
-> NOTE: there are also "background" services, which just do *stuff*, and aren't necessarily listening to a socket. For now we're just talking about listener services.
+       fail_to_connect -->|retry| upstream_peer
+       fail_to_connect -->|stop| fail_to_proxy[Create error response]
+       send_request -->|I/O failure| io_failure[I/O error]
+       read_response -->|I/O failure| io_failure
+       upstream_response_filter -->|filter error| proxy_error[Proxy error]
+       response_filter -->|filter error| proxy_error
+       upstream_response_body_filter -->|filter error| proxy_error
+       response_body_filter -->|filter error| proxy_error
+       io_failure --> proxy_error
+       proxy_error -->|retry| upstream_peer
+       proxy_error -->|stop| fail_to_proxy
+       fail_to_proxy --> logging
+       logging --> done([Request complete])
 
-By default, each service has its own threadpool/tokio runtime, with a number of threads based on the configured value, and worker threads are not shared cross-service. Services in a [runtime group](runtime_groups.md) share one runtime instead. Service runtime threadpools may be work-stealing (tokio-default), or non-work-stealing (N isolated single threaded runtimes).
-
-```
-┌─────────────────────────┐
-│ ┌─────────────────────┐ │
-│ │┌─────────┬─────────┐│ │
-│ ││  Conn   │  Conn   ││ │
-│ │├─────────┼─────────┤│ │
-│ ││Endpoint │Endpoint ││ │
-│ │├─────────┴─────────┤│ │
-│ ││     Listeners     ││ │
-│ │├─────────┬─────────┤│ │
-│ ││ Worker  │ Worker  ││ │
-│ ││ Thread  │ Thread  ││ │
-│ │├─────────┴─────────┤│ │
-│ ││  Tokio Executor   ││ │
-│ │└───────────────────┘│ │
-│ └─────────────────────┘ │
-│ ┌───────┐               │
-└─┤Service├───────────────┘
-  └───────┘
-```
+       classDef io fill:#fff3cd,stroke:#b58105,color:#332900
+       classDef error fill:#f8d7da,stroke:#a52834,color:#58151c
+       classDef complete fill:#d1e7dd,stroke:#146c43,color:#0a3622
+       class connect,send_request,read_response io
+       class fail_to_connect,io_failure,proxy_error,fail_to_proxy error
+       class start,done complete
+       style upstream fill:#f5f7fa,stroke:#64748b,stroke-width:1px
 
 ## Service Listeners
 
