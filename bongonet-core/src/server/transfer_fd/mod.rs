@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,14 +16,16 @@
 use log::{debug, error, warn};
 use nix::errno::Errno;
 #[cfg(target_os = "linux")]
-use nix::sys::socket::{self, AddressFamily, RecvMsg, SockFlag, SockType, UnixAddr};
+use nix::sys::socket::{self, AddressFamily, Backlog, RecvMsg, SockFlag, SockType, UnixAddr};
 #[cfg(target_os = "linux")]
 use nix::sys::stat;
 use nix::{Error, NixPath};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::io::{IoSlice, IoSliceMut};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
 #[cfg(target_os = "linux")]
 use std::{thread, time};
@@ -50,6 +52,10 @@ impl Fds {
         self.map.get(bind)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn serialize(&self) -> (Vec<String>, Vec<RawFd>) {
         self.map.iter().map(|(key, val)| (key.clone(), val)).unzip()
     }
@@ -65,21 +71,70 @@ impl Fds {
     where
         P: ?Sized + NixPath + std::fmt::Display,
     {
+        self.send_to_sock_with_retry(path, None)
+    }
+
+    /// Send the fds to the given socket.
+    /// `max_retry` overrides the default number of connect() retries.
+    pub(crate) fn send_to_sock_with_retry<P>(
+        &self,
+        path: &P,
+        max_retry: Option<usize>,
+    ) -> Result<usize, Error>
+    where
+        P: ?Sized + NixPath + std::fmt::Display,
+    {
         let (vec_key, vec_fds) = self.serialize();
         let mut ser_buf: [u8; 2048] = [0; 2048];
         let ser_key_size = serialize_vec_string(&vec_key, &mut ser_buf);
-        send_fds_to(vec_fds, &ser_buf[..ser_key_size], path)
+        send_fds_to(vec_fds, &ser_buf[..ser_key_size], path, max_retry)
     }
 
     pub fn get_from_sock<P>(&mut self, path: &P) -> Result<(), Error>
     where
         P: ?Sized + NixPath + std::fmt::Display,
     {
+        self.get_from_sock_with_retry(path, None)
+    }
+
+    /// Receive fds from the given socket.
+    /// `max_retry` overrides the default number of accept() retries.
+    pub(crate) fn get_from_sock_with_retry<P>(
+        &mut self,
+        path: &P,
+        max_retry: Option<usize>,
+    ) -> Result<(), Error>
+    where
+        P: ?Sized + NixPath + std::fmt::Display,
+    {
         let mut de_buf: [u8; 2048] = [0; 2048];
-        let (fds, bytes) = get_fds_from(path, &mut de_buf)?;
+        let (fds, bytes) = get_fds_from(path, &mut de_buf, max_retry)?;
         let keys = deserialize_vec_string(&de_buf[..bytes])?;
         self.deserialize(keys, fds);
         Ok(())
+    }
+
+    /// Close and remove inherited listening fds whose bind addresses are absent from `keep`.
+    ///
+    /// An unclaimed `SO_REUSEPORT` socket remains active without an acceptor and can black-hole
+    /// connections. Removing it also prevents it from being transferred to the next process.
+    /// Returns the addresses removed from the table.
+    #[cfg(unix)]
+    pub fn close_unclaimed(&mut self, keep: &HashSet<String>) -> Vec<String> {
+        let mut closed = Vec::new();
+        self.map.retain(|bind, fd| {
+            if keep.contains(bind) {
+                return true;
+            }
+            if let Err(e) = nix::unistd::close(*fd) {
+                log::warn!(
+                    "Failed to close orphaned inherited listening socket fd {fd} ({bind}): {e}"
+                );
+            }
+            closed.push(bind.clone());
+            false
+        });
+        closed
     }
 }
 
@@ -97,10 +152,15 @@ fn deserialize_vec_string(buf: &[u8]) -> Result<Vec<String>, Error> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn get_fds_from<P>(path: &P, payload: &mut [u8]) -> Result<(Vec<RawFd>, usize), Error>
+pub fn get_fds_from<P>(
+    path: &P,
+    payload: &mut [u8],
+    max_retry: Option<usize>,
+) -> Result<(Vec<RawFd>, usize), Error>
 where
     P: ?Sized + NixPath + std::fmt::Display,
 {
+    let max_retry = max_retry.unwrap_or(MAX_RETRY);
     const MAX_FDS: usize = 32;
 
     let listen_fd = socket::socket(
@@ -122,20 +182,27 @@ where
             // TODO: warn if exist but not able to unlink
         }
     };
-    socket::bind(listen_fd, &unix_addr).unwrap();
+    socket::bind(listen_fd.as_raw_fd(), &unix_addr).unwrap();
 
-    /* sock is created before we change user, need to give permission to all */
+    /* sock is created before we change user, need to give permission */
     stat::fchmodat(
-        None,
+        // SAFETY: AT_FDCWD is a well-defined POSIX sentinel constant used by *at() syscalls
+        // to indicate the current working directory. It is not a real file descriptor and does
+        // not require ownership or lifetime guarantees.
+        unsafe { BorrowedFd::borrow_raw(libc::AT_FDCWD) },
         path,
-        stat::Mode::all(),
+        stat::Mode::from_bits_truncate(0o666),
         stat::FchmodatFlags::FollowSymlink,
     )
     .unwrap();
 
-    socket::listen(listen_fd, 8).unwrap();
+    socket::listen(
+        &listen_fd,
+        Backlog::new(8).expect("8 is well within SOMAXCONN"),
+    )
+    .unwrap();
 
-    let fd = match accept_with_retry(listen_fd) {
+    let fd = match accept_with_retry_timeout(listen_fd.as_raw_fd(), max_retry) {
         Ok(fd) => fd,
         Err(e) => {
             error!("Giving up reading socket from: {path}, error: {e:?}");
@@ -147,18 +214,29 @@ where
         }
     };
 
+    // The accepted connection is only needed for this transfer. Take ownership of it so
+    // that it is closed on every path out of this function, including the early return
+    // from `cmsgs()?` below; otherwise every graceful upgrade leaks one unix socket.
+    //
+    // SAFETY: `fd` was just returned by accept(2) and is not owned or closed anywhere else.
+    let conn = unsafe { OwnedFd::from_raw_fd(fd) };
+
     let mut io_vec = [IoSliceMut::new(payload); 1];
     let mut cmsg_buf = nix::cmsg_space!([RawFd; MAX_FDS]);
+    // MSG_CMSG_CLOEXEC sets FD_CLOEXEC on the received descriptors atomically. These
+    // listening sockets are kept for the rest of the process's lifetime, so without it any
+    // subprocess an application built on bongonet execs inherits them, and can keep the
+    // port bound after the server itself is gone.
     let msg: RecvMsg<UnixAddr> = socket::recvmsg(
-        fd,
+        conn.as_raw_fd(),
         &mut io_vec,
         Some(&mut cmsg_buf),
-        socket::MsgFlags::empty(),
+        socket::MsgFlags::MSG_CMSG_CLOEXEC,
     )
     .unwrap();
 
     let mut fds: Vec<RawFd> = Vec::new();
-    for cmsg in msg.cmsgs() {
+    for cmsg in msg.cmsgs()? {
         if let socket::ControlMessageOwned::ScmRights(mut vec_fds) = cmsg {
             fds.append(&mut vec_fds)
         } else {
@@ -175,7 +253,11 @@ where
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn get_fds_from<P>(_path: &P, _payload: &mut [u8]) -> Result<(Vec<RawFd>, usize), Error>
+pub fn get_fds_from<P>(
+    _path: &P,
+    _payload: &mut [u8],
+    _max_retry: Option<usize>,
+) -> Result<(Vec<RawFd>, usize), Error>
 where
     P: ?Sized + NixPath + std::fmt::Display,
 {
@@ -189,18 +271,18 @@ const MAX_RETRY: usize = 5;
 const RETRY_INTERVAL: time::Duration = time::Duration::from_secs(1);
 
 #[cfg(target_os = "linux")]
-fn accept_with_retry(listen_fd: i32) -> Result<i32, Error> {
+fn accept_with_retry_timeout(listen_fd: i32, max_retry: usize) -> Result<i32, Error> {
     let mut retried = 0;
     loop {
         match socket::accept(listen_fd) {
             Ok(fd) => return Ok(fd),
             Err(e) => {
-                if retried > MAX_RETRY {
+                if retried > max_retry {
                     return Err(e);
                 }
                 match e {
                     Errno::EAGAIN => {
-                        error!(
+                        warn!(
                             "No incoming socket transfer, sleep {RETRY_INTERVAL:?} and try again"
                         );
                         retried += 1;
@@ -217,10 +299,16 @@ fn accept_with_retry(listen_fd: i32) -> Result<i32, Error> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn send_fds_to<P>(fds: Vec<RawFd>, payload: &[u8], path: &P) -> Result<usize, Error>
+pub fn send_fds_to<P>(
+    fds: Vec<RawFd>,
+    payload: &[u8],
+    path: &P,
+    max_retry: Option<usize>,
+) -> Result<usize, Error>
 where
     P: ?Sized + NixPath + std::fmt::Display,
 {
+    let max_retry = max_retry.unwrap_or(MAX_RETRY);
     const MAX_NONBLOCKING_POLLS: usize = 20;
     const NONBLOCKING_POLL_INTERVAL: time::Duration = time::Duration::from_millis(500);
 
@@ -235,7 +323,7 @@ where
     let mut nonblocking_polls = 0;
 
     let conn_result: Result<usize, Error> = loop {
-        match socket::connect(send_fd, &unix_addr) {
+        match socket::connect(send_fd.as_raw_fd(), &unix_addr) {
             Ok(_) => break Ok(0),
             Err(e) => match e {
                 /* If the new process hasn't created the upgrade sock we'll get an ENOENT.
@@ -245,10 +333,10 @@ where
                 Errno::ENOENT | Errno::ECONNREFUSED | Errno::EACCES => {
                     /*the server is not ready yet*/
                     retried += 1;
-                    if retried > MAX_RETRY {
+                    if retried > max_retry {
                         error!(
                             "Max retry: {} reached. Giving up sending socket to: {}, error: {:?}",
-                            MAX_RETRY, path, e
+                            max_retry, path, e
                         );
                         break Err(e);
                     }
@@ -280,7 +368,7 @@ where
             let cmsg = [scm; 1];
             loop {
                 match socket::sendmsg(
-                    send_fd,
+                    send_fd.as_raw_fd(),
                     &io_vec,
                     &cmsg,
                     socket::MsgFlags::empty(),
@@ -317,7 +405,12 @@ where
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn send_fds_to<P>(_fds: Vec<RawFd>, _payload: &[u8], _path: &P) -> Result<usize, Error>
+pub fn send_fds_to<P>(
+    _fds: Vec<RawFd>,
+    _payload: &[u8],
+    _path: &P,
+    _max_retry: Option<usize>,
+) -> Result<usize, Error>
 where
     P: ?Sized + NixPath + std::fmt::Display,
 {
@@ -327,8 +420,11 @@ where
 #[cfg(test)]
 #[cfg(target_os = "linux")]
 mod tests {
+    use std::os::fd::AsRawFd;
+
     use super::*;
     use log::{debug, error};
+    use nix::fcntl;
 
     fn init_log() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -386,7 +482,8 @@ mod tests {
         // receiver need to start in another thread since it is blocking
         let child = thread::spawn(move || {
             let mut buf: [u8; 32] = [0; 32];
-            let (fds, bytes) = get_fds_from("/tmp/bongonet_fds_receive.sock", &mut buf).unwrap();
+            let (fds, bytes) =
+                get_fds_from("/tmp/bongonet_fds_receive.sock", &mut buf, None).unwrap();
             debug!("{:?}", fds);
             assert_eq!(1, fds.len());
             assert_eq!(32, bytes);
@@ -394,9 +491,9 @@ mod tests {
             assert_eq!(1, buf[31]);
         });
 
-        let fds = vec![dumb_fd];
+        let fds = vec![dumb_fd.as_raw_fd()];
         let buf: [u8; 128] = [1; 128];
-        match send_fds_to(fds, &buf, "/tmp/bongonet_fds_receive.sock") {
+        match send_fds_to(fds, &buf, "/tmp/bongonet_fds_receive.sock", None) {
             Ok(sent) => {
                 assert!(sent > 0);
             }
@@ -405,6 +502,90 @@ mod tests {
                 panic!()
             }
         }
+
+        child.join().unwrap();
+    }
+
+    /// How many fds in this process refer to a unix socket bound to `path`.
+    ///
+    /// Reads the socket inodes bound to `path` from /proc/net/unix, then scans
+    /// /proc/self/fd for descriptors pointing at them. Filtering by path keeps this
+    /// unaffected by unrelated descriptors opened by tests running in parallel.
+    fn unix_socket_fds_bound_to(path: &str) -> usize {
+        let unix = std::fs::read_to_string("/proc/net/unix").unwrap();
+        let inodes: HashSet<&str> = unix
+            .lines()
+            .filter_map(|line| {
+                let mut cols = line.split_whitespace();
+                let inode = cols.nth(6)?;
+                (cols.next() == Some(path)).then_some(inode)
+            })
+            .collect();
+        if inodes.is_empty() {
+            return 0;
+        }
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| {
+                target
+                    .to_str()
+                    .and_then(|t| t.strip_prefix("socket:["))
+                    .and_then(|t| t.strip_suffix(']'))
+                    .is_some_and(|inode| inodes.contains(inode))
+            })
+            .count()
+    }
+
+    #[test]
+    fn test_receive_does_not_leak_fds() {
+        init_log();
+        const SOCK: &str = "/tmp/bongonet_fds_receive3.sock";
+
+        let dumb_fd = socket::socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+
+        // receiver need to start in another thread since it is blocking
+        let child = thread::spawn(move || {
+            let mut buf: [u8; 32] = [0; 32];
+            let (fds, _) = get_fds_from(SOCK, &mut buf, None).unwrap();
+            assert_eq!(1, fds.len());
+
+            // The received listener is kept for the lifetime of the process, so it must
+            // not be inherited by unrelated children across exec().
+            let flags = fcntl::fcntl(
+                // SAFETY: the fd was just received and stays open for this call.
+                unsafe { BorrowedFd::borrow_raw(fds[0]) },
+                fcntl::FcntlArg::F_GETFD,
+            )
+            .unwrap();
+            assert!(
+                fcntl::FdFlag::from_bits_truncate(flags).contains(fcntl::FdFlag::FD_CLOEXEC),
+                "fd received over SCM_RIGHTS is missing FD_CLOEXEC"
+            );
+
+            // The accepted connection is only needed during the transfer itself.
+            assert_eq!(
+                0,
+                unix_socket_fds_bound_to(SOCK),
+                "the accepted transfer socket was left open"
+            );
+
+            // Don't leak the descriptors this test just received.
+            for fd in fds {
+                // SAFETY: received over SCM_RIGHTS just above and not owned anywhere else.
+                drop(unsafe { OwnedFd::from_raw_fd(fd) });
+            }
+        });
+
+        let fds = vec![dumb_fd.as_raw_fd()];
+        let buf: [u8; 32] = [1; 32];
+        send_fds_to(fds, &buf, SOCK, None).unwrap();
 
         child.join().unwrap();
     }
@@ -421,7 +602,7 @@ mod tests {
             None,
         )
         .unwrap();
-        fds.add(key1.clone(), dumb_fd1);
+        fds.add(key1.clone(), dumb_fd1.as_raw_fd());
         let key2 = "1.1.1.1:443".to_string();
         let dumb_fd2 = socket::socket(
             AddressFamily::Unix,
@@ -430,7 +611,7 @@ mod tests {
             None,
         )
         .unwrap();
-        fds.add(key2.clone(), dumb_fd2);
+        fds.add(key2.clone(), dumb_fd2.as_raw_fd());
 
         let child = thread::spawn(move || {
             let mut fds2 = Fds::new();
@@ -442,5 +623,199 @@ mod tests {
 
         fds.send_to_sock("/tmp/bongonet_fds_receive2.sock").unwrap();
         child.join().unwrap();
+    }
+
+    #[test]
+    fn test_send_fds_to_respects_configurable_timeout() {
+        init_log();
+        use std::time::Instant;
+
+        let dumb_fd = socket::socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+
+        let fds = vec![dumb_fd.as_raw_fd()];
+        let buf: [u8; 32] = [1; 32];
+
+        // Try to send with a custom max_retries of 2
+        let start = Instant::now();
+        let result = send_fds_to(fds, &buf, "/tmp/bongonet_test_config_send.sock", Some(2));
+        let elapsed = start.elapsed();
+
+        // Should fail after 2 retries with RETRY_INTERVAL (1 second) between each
+        // Total time should be approximately 2 seconds
+        assert!(result.is_err());
+        assert!(
+            elapsed.as_secs() >= 2,
+            "Expected at least 2 seconds, got {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 4,
+            "Expected less than 4 seconds, got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_get_fds_from_respects_configurable_timeout() {
+        init_log();
+        use std::time::Instant;
+
+        let mut buf: [u8; 32] = [0; 32];
+
+        // Try to receive with a custom max_retries of 2
+        let start = Instant::now();
+        let result = get_fds_from("/tmp/bongonet_test_config_receive.sock", &mut buf, Some(2));
+        let elapsed = start.elapsed();
+
+        // Should fail after 2 retries with RETRY_INTERVAL (1 second) between each
+        // Total time should be approximately 2 seconds
+        assert!(result.is_err());
+        assert!(
+            elapsed.as_secs() >= 2,
+            "Expected at least 2 seconds, got {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 4,
+            "Expected less than 4 seconds, got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_fds_send_to_sock_with_retry_respects_max_retry() {
+        init_log();
+        use std::time::Instant;
+
+        let dumb_fd = socket::socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+
+        let mut fds = Fds::new();
+        fds.add("127.0.0.1:80".to_string(), dumb_fd.as_raw_fd());
+
+        // Try to send with a custom max_retries of 0
+        let start = Instant::now();
+        let result = fds.send_to_sock_with_retry("/tmp/bongonet_test_fds_send_retry.sock", Some(0));
+        let elapsed = start.elapsed();
+
+        // Should fail on the first connect attempt without sleeping for RETRY_INTERVAL
+        assert!(result.is_err());
+        assert!(
+            elapsed.as_secs() < 2,
+            "Expected less than 2 seconds, got {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_fds_get_from_sock_with_retry_respects_max_retry() {
+        init_log();
+        use std::time::Instant;
+
+        let mut fds = Fds::new();
+
+        // Try to receive with a custom max_retries of 0
+        let start = Instant::now();
+        let result =
+            fds.get_from_sock_with_retry("/tmp/bongonet_test_fds_receive_retry.sock", Some(0));
+        let elapsed = start.elapsed();
+
+        // Should fail after a single RETRY_INTERVAL (1 second) instead of the default 5 retries
+        assert!(result.is_err());
+        assert!(fds.is_empty());
+        assert!(
+            elapsed.as_secs() >= 1,
+            "Expected at least 1 second, got {:?}",
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() < 4,
+            "Expected less than 4 seconds, got {:?}",
+            elapsed
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod close_unclaimed_tests {
+    use super::Fds;
+    use std::collections::HashSet;
+    use std::io::{ErrorKind, Read};
+    use std::os::unix::io::{FromRawFd, IntoRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    // Closure is observed by reading the other end of a socket pair, which
+    // reports end-of-file exactly when its peer is gone. Checking the descriptor
+    // *number* would be racy: numbers are process-wide and reassigned
+    // lowest-free-first, so a concurrent test in this binary can be handed the
+    // number just closed and make it valid again first. Observing ends are
+    // non-blocking, so a descriptor that wrongly stayed open fails an assertion
+    // rather than hanging.
+    //
+    // A second owning handle would turn a wrongly closed descriptor into an I/O
+    // safety abort of the whole binary, so `Fds` gets raw numbers.
+
+    #[test]
+    fn closes_only_unclaimed_fds() {
+        let (mut keep_peer, keep_local) = UnixStream::pair().unwrap();
+        let (mut drop_peer, drop_local) = UnixStream::pair().unwrap();
+        keep_peer.set_nonblocking(true).unwrap();
+        drop_peer.set_nonblocking(true).unwrap();
+        let keep_fd = keep_local.into_raw_fd();
+
+        let mut fds = Fds::new();
+        fds.add("127.0.0.1:80".to_string(), keep_fd);
+        fds.add("127.0.0.1:9090".to_string(), drop_local.into_raw_fd());
+
+        let keep: HashSet<String> = ["127.0.0.1:80".to_string()].into_iter().collect();
+        let closed = fds.close_unclaimed(&keep);
+
+        assert_eq!(closed, vec!["127.0.0.1:9090".to_string()]);
+        assert_eq!(*fds.get("127.0.0.1:80").unwrap(), keep_fd);
+        assert!(fds.get("127.0.0.1:9090").is_none());
+
+        // Dropping the map entry is not enough: the descriptor itself has to be
+        // closed, which is the leak this function exists to prevent.
+        assert!(
+            matches!(drop_peer.read(&mut [0u8; 1]), Ok(0)),
+            "the unclaimed descriptor was not closed"
+        );
+        assert!(
+            matches!(keep_peer.read(&mut [0u8; 1]), Err(e) if e.kind() == ErrorKind::WouldBlock),
+            "the claimed descriptor was closed"
+        );
+
+        // `Fds` does not close on drop.
+        // SAFETY: asserted open just above, and no other owner remains.
+        drop(unsafe { OwnedFd::from_raw_fd(keep_fd) });
+    }
+
+    #[test]
+    fn empty_keep_set_closes_everything() {
+        let (mut peer, local) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+
+        let mut fds = Fds::new();
+        fds.add("127.0.0.1:9090".to_string(), local.into_raw_fd());
+
+        let closed = fds.close_unclaimed(&HashSet::new());
+
+        assert_eq!(closed, vec!["127.0.0.1:9090".to_string()]);
+        assert!(fds.is_empty());
+        assert!(
+            matches!(peer.read(&mut [0u8; 1]), Ok(0)),
+            "the unclaimed descriptor was not closed"
+        );
     }
 }

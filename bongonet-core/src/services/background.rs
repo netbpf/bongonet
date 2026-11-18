@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,18 +22,39 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use super::Service;
+use super::{ServiceReadyNotifier, ServiceWithDependents};
 #[cfg(unix)]
 use crate::server::ListenFds;
 use crate::server::ShutdownWatch;
 
 /// The background service interface
+///
+/// You can implement a background service with or without the ready notifier,
+/// but you shouldn't implement both. Under the hood, the bongonet service will
+/// call the `start_with_ready_notifier` function. By default this function will
+/// call the regular `start` function.
 #[async_trait]
 pub trait BackgroundService {
     /// This function is called when the bongonet server tries to start all the
+    /// services. The background service should signal readiness by calling
+    /// `ready_notifier.notify_ready()` once initialization is complete.
+    /// The service can return at anytime or wait for the `shutdown` signal.
+    ///
+    /// By default this method will immediately signal readiness and call
+    /// through to the regular `start` function
+    async fn start_with_ready_notifier(
+        &self,
+        shutdown: ShutdownWatch,
+        ready_notifier: ServiceReadyNotifier,
+    ) {
+        ready_notifier.notify_ready();
+        self.start(shutdown).await;
+    }
+
+    /// This function is called when the bongonet server tries to start all the
     /// services. The background service can return at anytime or wait for the
     /// `shutdown` signal.
-    async fn start(&self, mut shutdown: ShutdownWatch);
+    async fn start(&self, mut _shutdown: ShutdownWatch) {}
 }
 
 /// A generic type of background service
@@ -63,16 +84,21 @@ impl<A> GenBackgroundService<A> {
 }
 
 #[async_trait]
-impl<A> Service for GenBackgroundService<A>
+impl<A> ServiceWithDependents for GenBackgroundService<A>
 where
     A: BackgroundService + Send + Sync + 'static,
 {
+    // Use default start_service implementation which signals ready immediately
+    // and then calls start_service
+
     async fn start_service(
         &mut self,
         #[cfg(unix)] _fds: Option<ListenFds>,
         shutdown: ShutdownWatch,
+        _listeners_per_fd: usize,
+        ready: ServiceReadyNotifier,
     ) {
-        self.task.start(shutdown).await;
+        self.task.start_with_ready_notifier(shutdown, ready).await;
     }
 
     fn name(&self) -> &str {
@@ -82,9 +108,13 @@ where
     fn threads(&self) -> Option<usize> {
         self.threads
     }
+
+    fn listen_addresses(&self) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
 }
 
-// Helper function to create a background service with a human readable name
+/// Helper function to create a background service with a human readable name
 pub fn background_service<SV>(name: &str, task: SV) -> GenBackgroundService<SV> {
     GenBackgroundService::new(format!("BG {name}"), Arc::new(task))
 }

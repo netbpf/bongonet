@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,11 +20,17 @@
 
 use crate::apps::ServerApp;
 use crate::listeners::tls::TlsSettings;
-use crate::listeners::{Listeners, ServerAddress, TcpSocketOptions, TransportStack};
+#[cfg(feature = "connection_filter")]
+use crate::listeners::AcceptAllFilter;
+use crate::listeners::{
+    ConnectionFilter, HandshakeFailure, ListenerConfig, Listeners, ServerAddress, TcpSocketOptions,
+    TransportStack,
+};
+use crate::protocols::http::custom::server::Session as CustomServerSession;
 use crate::protocols::Stream;
 #[cfg(unix)]
 use crate::server::ListenFds;
-use crate::server::ShutdownWatch;
+use crate::server::{RuntimeOpts, ShutdownWatch};
 use crate::services::Service as ServiceTrait;
 
 use async_trait::async_trait;
@@ -32,38 +38,115 @@ use bongonet_error::Result;
 use bongonet_runtime::current_handle;
 use log::{debug, error, info};
 use std::fs::Permissions;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// Override the runtime options used to run a listening service.
+pub type RuntimeOptsOverride = Arc<dyn Fn(&RuntimeOpts) -> Option<RuntimeOpts> + Send + Sync>;
+
 /// The type of service that is associated with a list of listening endpoints and a particular application
-pub struct Service<A> {
+pub struct Service<A, DS = ()>
+where
+    DS: CustomServerSession,
+{
     name: String,
     listeners: Listeners,
     app_logic: Option<A>,
+    _custom_session: PhantomData<fn() -> DS>,
     /// The number of preferred threads. `None` to follow global setting.
     pub threads: Option<usize>,
+    runtime_opts_override: Option<RuntimeOptsOverride>,
+    runtime_group: Option<String>,
+    #[cfg(feature = "connection_filter")]
+    connection_filter: Arc<dyn ConnectionFilter>,
 }
 
-impl<A> Service<A> {
-    /// Create a new [`Service`] with the given application (see [`crate::apps`]).
-    pub fn new(name: String, app_logic: A) -> Self {
+impl<A, DS> Service<A, DS>
+where
+    DS: CustomServerSession,
+{
+    /// Create a new [`Service`] with a concrete custom downstream session type.
+    pub fn new_with_custom_session(name: String, app_logic: A) -> Self {
         Service {
             name,
             listeners: Listeners::new(),
             app_logic: Some(app_logic),
+            _custom_session: PhantomData,
             threads: None,
+            runtime_opts_override: None,
+            runtime_group: None,
+            #[cfg(feature = "connection_filter")]
+            connection_filter: Arc::new(AcceptAllFilter),
         }
     }
 
-    /// Create a new [`Service`] with the given application (see [`crate::apps`]) and the given
-    /// [`Listeners`].
-    pub fn with_listeners(name: String, listeners: Listeners, app_logic: A) -> Self {
+    /// Create a new [`Service`] with listeners and a concrete custom downstream session type.
+    pub fn with_listeners_and_custom_session(
+        name: String,
+        listeners: Listeners,
+        app_logic: A,
+    ) -> Self {
         Service {
             name,
             listeners,
             app_logic: Some(app_logic),
+            _custom_session: PhantomData,
             threads: None,
+            runtime_opts_override: None,
+            runtime_group: None,
+            #[cfg(feature = "connection_filter")]
+            connection_filter: Arc::new(AcceptAllFilter),
         }
     }
+
+    /// Set a runtime options override for this service.
+    ///
+    /// Returning [`None`] from the override uses the global runtime options.
+    pub fn set_runtime_opts_override(&mut self, override_fn: RuntimeOptsOverride) {
+        self.runtime_opts_override = Some(override_fn);
+    }
+
+    /// Run this service in the named runtime group.
+    ///
+    /// Services in the same group share one runtime. See
+    /// [`ServiceWithDependents::runtime_group`](crate::services::ServiceWithDependents::runtime_group).
+    pub fn set_runtime_group(&mut self, group: impl Into<String>) {
+        self.runtime_group = Some(group.into());
+    }
+
+    /// Set a custom connection filter for this service.
+    ///
+    /// The connection filter will be applied to all incoming connections
+    /// on all endpoints of this service. Connections that don't pass the
+    /// filter will be dropped immediately at the TCP level, before TLS
+    /// handshake or any HTTP processing.
+    ///
+    /// # Feature Flag
+    ///
+    /// This method requires the `connection_filter` feature to be enabled.
+    /// When the feature is disabled, this method is a no-op.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use std::sync::Arc;
+    /// # use bongonet_core::listeners::{ConnectionFilter, AcceptAllFilter};
+    /// # struct MyService;
+    /// # impl MyService {
+    /// #   fn new() -> Self { MyService }
+    /// # }
+    /// let mut service = MyService::new();
+    /// let filter = Arc::new(AcceptAllFilter);
+    /// service.set_connection_filter(filter);
+    /// ```
+    #[cfg(feature = "connection_filter")]
+    pub fn set_connection_filter(&mut self, filter: Arc<dyn ConnectionFilter>) {
+        self.connection_filter = filter.clone();
+        self.listeners.set_connection_filter(filter);
+    }
+
+    #[cfg(not(feature = "connection_filter"))]
+    pub fn set_connection_filter(&mut self, _filter: Arc<dyn ConnectionFilter>) {}
 
     /// Get the [`Listeners`], mostly to add more endpoints.
     pub fn endpoints(&mut self) -> &mut Listeners {
@@ -75,6 +158,11 @@ impl<A> Service<A> {
     /// Add a TCP listening endpoint with the given address (e.g., `127.0.0.1:8000`).
     pub fn add_tcp(&mut self, addr: &str) {
         self.listeners.add_tcp(addr);
+    }
+
+    /// Add a listening endpoint configured by a [`ListenerConfig`].
+    pub fn add_listener(&mut self, endpoint: ListenerConfig) {
+        self.listeners.add_listener(endpoint);
     }
 
     /// Add a TCP listening endpoint with the given [`TcpSocketOptions`].
@@ -123,7 +211,24 @@ impl<A> Service<A> {
     }
 }
 
-impl<A: ServerApp + Send + Sync + 'static> Service<A> {
+impl<A> Service<A, ()> {
+    /// Create a new [`Service`] with the given application (see [`crate::apps`]).
+    pub fn new(name: String, app_logic: A) -> Self {
+        Self::new_with_custom_session(name, app_logic)
+    }
+
+    /// Create a new [`Service`] with the given application (see [`crate::apps`]) and the given
+    /// [`Listeners`].
+    pub fn with_listeners(name: String, listeners: Listeners, app_logic: A) -> Self {
+        Self::with_listeners_and_custom_session(name, listeners, app_logic)
+    }
+}
+
+impl<A, DS> Service<A, DS>
+where
+    A: ServerApp<DS> + Send + Sync + 'static,
+    DS: CustomServerSession,
+{
     pub async fn handle_event(event: Stream, app_logic: Arc<A>, shutdown: ShutdownWatch) {
         debug!("new event!");
         let mut reuse_event = app_logic.process_new(event, &shutdown).await;
@@ -163,19 +268,31 @@ impl<A: ServerApp + Send + Sync + 'static> Service<A> {
             };
             match new_io {
                 Ok(io) => {
+                    // At one of the endpoint's limits: the connection is already closed.
+                    let Some(io) = stack.admit(io) else {
+                        continue;
+                    };
                     let app = app_logic.clone();
                     let shutdown = shutdown.clone();
                     current_handle().spawn(async move {
                         let peer_addr = io.peer_addr();
-                        match io.handshake().await {
+                        match io.handshake_with_limits().await {
                             Ok(io) => Self::handle_event(io, app, shutdown).await,
-                            Err(e) => {
+                            Err(HandshakeFailure::Skipped(reason)) => {
+                                debug!(
+                                    "Closed a downstream connection before its handshake: {reason}"
+                                );
+                            }
+                            Err(HandshakeFailure::Error(e)) => {
                                 // TODO: Maybe IOApp trait needs a fn to handle/filter out this error
                                 if let Some(addr) = peer_addr {
                                     error!("Downstream handshake error from {}: {e}", addr);
                                 } else {
                                     error!("Downstream handshake error: {e}");
                                 }
+                            }
+                            Err(HandshakeFailure::TimedOut) => {
+                                error!("Downstream handshake timeout");
                             }
                         }
                     });
@@ -204,11 +321,16 @@ impl<A: ServerApp + Send + Sync + 'static> Service<A> {
 }
 
 #[async_trait]
-impl<A: ServerApp + Send + Sync + 'static> ServiceTrait for Service<A> {
+impl<A, DS> ServiceTrait for Service<A, DS>
+where
+    A: ServerApp<DS> + Send + Sync + 'static,
+    DS: CustomServerSession,
+{
     async fn start_service(
         &mut self,
         #[cfg(unix)] fds: Option<ListenFds>,
         shutdown: ShutdownWatch,
+        listeners_per_fd: usize,
     ) {
         let runtime = current_handle();
         let endpoints = self
@@ -226,12 +348,20 @@ impl<A: ServerApp + Send + Sync + 'static> ServiceTrait for Service<A> {
             .expect("can only start_service() once");
         let app_logic = Arc::new(app_logic);
 
-        let handlers = endpoints.into_iter().map(|endpoint| {
-            let shutdown = shutdown.clone();
-            let my_app_logic = app_logic.clone();
-            runtime.spawn(async move {
-                Self::run_endpoint(my_app_logic, endpoint, shutdown).await;
-            })
+        let mut handlers = Vec::new();
+
+        endpoints.into_iter().for_each(|endpoint| {
+            for _ in 0..listeners_per_fd {
+                let shutdown = shutdown.clone();
+                let my_app_logic = app_logic.clone();
+                let endpoint = endpoint.clone();
+
+                let jh = runtime.spawn(async move {
+                    Self::run_endpoint(my_app_logic, endpoint, shutdown).await;
+                });
+
+                handlers.push(jh);
+            }
         });
 
         futures::future::join_all(handlers).await;
@@ -246,18 +376,159 @@ impl<A: ServerApp + Send + Sync + 'static> ServiceTrait for Service<A> {
     fn threads(&self) -> Option<usize> {
         self.threads
     }
+
+    fn runtime_opts_override(&self, global: &RuntimeOpts) -> Option<RuntimeOpts> {
+        self.runtime_opts_override
+            .as_ref()
+            .and_then(|override_fn| override_fn(global))
+    }
+
+    fn runtime_group(&self) -> Option<&str> {
+        self.runtime_group.as_deref()
+    }
+
+    fn listen_addresses(&self) -> Option<Vec<String>> {
+        Some(self.listeners.addresses())
+    }
 }
 
-use crate::apps::prometheus_http_app::PrometheusServer;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::listeners::{AcceptLimits, AcceptStats};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
-impl Service<PrometheusServer> {
-    /// The Prometheus HTTP server
-    ///
-    /// The HTTP server endpoint that reports Prometheus metrics collected in the entire service
-    pub fn prometheus_http_service() -> Self {
-        Service::new(
-            "Prometheus metric HTTP".to_string(),
-            PrometheusServer::new(),
-        )
+    /// Keeps each connection until its client sends a byte, then closes it.
+    struct HoldUntilByte;
+
+    #[async_trait]
+    impl ServerApp for HoldUntilByte {
+        async fn process_new(
+            self: &Arc<Self>,
+            mut session: Stream,
+            _shutdown: &ShutdownWatch,
+        ) -> Option<Stream> {
+            let mut buf = [0; 1];
+            let _ = session.read(&mut buf).await;
+            None
+        }
+    }
+
+    /// Sends each connection to the test and returns at once, like an application that serves
+    /// connections on tasks of its own.
+    struct HandOff(tokio::sync::mpsc::UnboundedSender<Stream>);
+
+    #[async_trait]
+    impl ServerApp for HandOff {
+        async fn process_new(
+            self: &Arc<Self>,
+            session: Stream,
+            _shutdown: &ShutdownWatch,
+        ) -> Option<Stream> {
+            let _ = self.0.send(session);
+            None
+        }
+    }
+
+    /// An endpoint that keeps at most one connection open.
+    async fn build_one_connection_endpoint(stats: &Arc<AcceptStats>) -> TransportStack {
+        let mut listeners = Listeners::new();
+        listeners.add_listener(
+            ListenerConfig::tcp("127.0.0.1:0").accept_limits(AcceptLimits {
+                max_connections: Some(1),
+                stats: Some(stats.clone()),
+                ..Default::default()
+            }),
+        );
+        listeners
+            .build(
+                #[cfg(unix)]
+                None,
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
+
+    async fn wait_for(what: &str, cond: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if cond() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_limit_holds_until_the_session_ends() {
+        let stats = Arc::new(AcceptStats::default());
+        let stack = build_one_connection_endpoint(&stats).await;
+        let addr = stack.local_addr().unwrap();
+        let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let endpoint = tokio::spawn(Service::<HoldUntilByte>::run_endpoint(
+            Arc::new(HoldUntilByte),
+            stack,
+            shutdown,
+        ));
+
+        let mut first = TcpStream::connect(addr).await.unwrap();
+        wait_for("the first session", || {
+            stats.pending_handshakes() == 0 && stats.open_connections() == 1
+        })
+        .await;
+
+        // The session is still running, so the second connection is over the limit.
+        let mut second = TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0; 1];
+        assert!(matches!(second.read(&mut buf).await, Ok(0) | Err(_)));
+        assert_eq!(stats.closed_at_connection_limit(), 1);
+
+        // Ending the session frees the slot.
+        first.write_all(b"x").await.unwrap();
+        wait_for("the first session to end", || stats.open_connections() == 0).await;
+        let _third = TcpStream::connect(addr).await.unwrap();
+        wait_for("the third session", || stats.open_connections() == 1).await;
+        assert_eq!(stats.closed_at_connection_limit(), 1);
+
+        shutdown_tx.send(true).unwrap();
+        endpoint.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connection_limit_holds_while_the_app_keeps_the_stream() {
+        let stats = Arc::new(AcceptStats::default());
+        let stack = build_one_connection_endpoint(&stats).await;
+        let addr = stack.local_addr().unwrap();
+        let (shutdown_tx, shutdown) = tokio::sync::watch::channel(false);
+        let (streams_tx, mut streams) = tokio::sync::mpsc::unbounded_channel();
+        let endpoint = tokio::spawn(Service::<HandOff>::run_endpoint(
+            Arc::new(HandOff(streams_tx)),
+            stack,
+            shutdown,
+        ));
+
+        let _first = TcpStream::connect(addr).await.unwrap();
+        let held = streams.recv().await.unwrap();
+        // `process_new` has returned, but the stream is still open, so it still counts.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(stats.open_connections(), 1);
+        let mut second = TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0; 1];
+        assert!(matches!(second.read(&mut buf).await, Ok(0) | Err(_)));
+        assert_eq!(stats.closed_at_connection_limit(), 1);
+
+        // Dropping the stream frees the slot.
+        drop(held);
+        assert_eq!(stats.open_connections(), 0);
+        let _third = TcpStream::connect(addr).await.unwrap();
+        let _held = streams.recv().await.unwrap();
+        assert_eq!(stats.open_connections(), 1);
+        assert_eq!(stats.closed_at_connection_limit(), 1);
+
+        shutdown_tx.send(true).unwrap();
+        endpoint.await.unwrap();
     }
 }

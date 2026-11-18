@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,32 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bongonet_error::{ErrorType, OrErr, Result};
+use bongonet_error::{Error, ErrorType, ErrorType::InternalError, OrErr, Result};
 use log::debug;
 use std::ops::{Deref, DerefMut};
 
+use crate::listeners::tls::boringssl_openssl::alpn::valid_alpn;
+use crate::offload::OffloadRuntime;
 pub use crate::protocols::tls::ALPN;
 use crate::protocols::IO;
+use crate::server::configuration::ServerConf;
+use crate::tls::ssl::AlpnError;
 use crate::tls::ssl::{SslAcceptor, SslAcceptorBuilder, SslFiletype, SslMethod};
 use crate::{
-    listeners::TlsAcceptCallbacks,
+    listeners::{SharedTlsAcceptCallbacks, TlsAcceptCallbacks},
     protocols::tls::{
         server::{handshake, handshake_with_callback},
         SslStream,
     },
 };
-
 pub const TLS_CONF_ERR: ErrorType = ErrorType::Custom("TLSConfigError");
 
 pub(crate) struct Acceptor {
     ssl_acceptor: SslAcceptor,
-    callbacks: Option<TlsAcceptCallbacks>,
+    callbacks: Option<SharedTlsAcceptCallbacks>,
+    offload: Option<OffloadRuntime>,
+    write_coalescing: bool,
 }
 
 /// The TLS settings of a listening endpoint
 pub struct TlsSettings {
     accept_builder: SslAcceptorBuilder,
     callbacks: Option<TlsAcceptCallbacks>,
+    offload_threadpool: Option<(usize, usize)>,
+    write_coalescing: bool,
 }
 
 impl From<SslAcceptorBuilder> for TlsSettings {
@@ -45,6 +52,8 @@ impl From<SslAcceptorBuilder> for TlsSettings {
         TlsSettings {
             accept_builder: settings,
             callbacks: None,
+            offload_threadpool: None,
+            write_coalescing: false,
         }
     }
 }
@@ -83,6 +92,8 @@ impl TlsSettings {
         Ok(TlsSettings {
             accept_builder,
             callbacks: None,
+            offload_threadpool: None,
+            write_coalescing: false,
         })
     }
 
@@ -96,13 +107,55 @@ impl TlsSettings {
         Ok(TlsSettings {
             accept_builder,
             callbacks: Some(callbacks),
+            offload_threadpool: None,
+            write_coalescing: false,
         })
+    }
+
+    /// Offload server-side TLS handshakes for this endpoint to dedicated
+    /// single-threaded runtime pools.
+    ///
+    /// `shards` partitions accepted connections by connection id, and
+    /// `threads_per_shard` controls how many single-threaded runtimes are
+    /// available per shard. Both values must be greater than zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either `shards` or `threads_per_shard` is zero.
+    #[track_caller]
+    pub fn set_offload_threadpool(&mut self, shards: usize, threads_per_shard: usize) {
+        assert!(shards != 0, "shards must be greater than zero");
+        assert!(
+            threads_per_shard != 0,
+            "threads_per_shard must be greater than zero"
+        );
+        self.offload_threadpool = Some((shards, threads_per_shard));
+    }
+
+    /// Offload server-side TLS handshakes using the downstream TLS offload
+    /// settings in [`ServerConf`], when both values are set and non-zero.
+    ///
+    /// This helper lets callers wire configuration files into per-listener
+    /// [`TlsSettings`]. If either configuration value is unset or zero,
+    /// this method leaves handshake offload disabled.
+    pub fn set_offload_threadpool_from_server_conf(&mut self, server_conf: &ServerConf) {
+        if let Some((shards, threads_per_shard)) = server_conf.downstream_tls_offload_threadpool() {
+            self.set_offload_threadpool(shards, threads_per_shard);
+        }
     }
 
     /// Enable HTTP/2 support for this endpoint, which is default off.
     /// This effectively sets the ALPN to prefer HTTP/2 with HTTP/1.1 allowed
     pub fn enable_h2(&mut self) {
         self.set_alpn(ALPN::H2H1);
+    }
+
+    /// Coalesce the vectored writes of connections accepted on this endpoint, which is
+    /// default off. See [`SslStream::enable_write_coalescing`].
+    ///
+    /// **Note:** this is _unstable_ and may be renamed or removed in the future.
+    pub fn enable_write_coalescing(&mut self) {
+        self.write_coalescing = true;
     }
 
     /// Set the ALPN preference of this endpoint. See [`ALPN`] for more details
@@ -113,26 +166,76 @@ impl TlsSettings {
                 .set_alpn_select_callback(alpn::prefer_h2),
             ALPN::H1 => self.accept_builder.set_alpn_select_callback(alpn::h1_only),
             ALPN::H2 => self.accept_builder.set_alpn_select_callback(alpn::h2_only),
+            ALPN::Custom(custom) => {
+                self.accept_builder
+                    .set_alpn_select_callback(move |_, alpn_in| {
+                        if !valid_alpn(alpn_in) {
+                            return Err(AlpnError::NOACK);
+                        }
+                        match alpn::select_protocol(alpn_in, custom.protocol()) {
+                            Some(p) => Ok(p),
+                            None => Err(AlpnError::NOACK),
+                        }
+                    });
+            }
         }
     }
 
     pub(crate) fn build(self) -> Acceptor {
         Acceptor {
             ssl_acceptor: self.accept_builder.build(),
-            callbacks: self.callbacks,
+            callbacks: self.callbacks.map(SharedTlsAcceptCallbacks::from),
+            offload: self.offload_threadpool.map(|(shards, threads_per_shard)| {
+                OffloadRuntime::new("downstream TLS offload", shards, threads_per_shard)
+            }),
+            write_coalescing: self.write_coalescing,
         }
     }
 }
 
 impl Acceptor {
-    pub async fn tls_handshake<S: IO>(&self, stream: S) -> Result<SslStream<S>> {
+    #[cfg(test)]
+    pub async fn tls_handshake<S: IO + 'static>(&self, stream: S) -> Result<SslStream<S>> {
+        self.tls_handshake_checked(stream, |_| Ok(())).await
+    }
+
+    /// Run [`Self::tls_handshake`]. If a TLS offload thread runs the handshake, `check` runs
+    /// first on that thread, and an error from it is returned instead of starting the handshake.
+    /// Otherwise `check` is not called.
+    pub(crate) async fn tls_handshake_checked<S, E>(
+        &self,
+        stream: S,
+        check: impl FnOnce(&S) -> Result<(), E> + Send + 'static,
+    ) -> Result<SslStream<S>, E>
+    where
+        S: IO + 'static,
+        E: From<Box<Error>> + Send + 'static,
+    {
         debug!("new ssl session");
-        // TODO: be able to offload this handshake in a thread pool
-        if let Some(cb) = self.callbacks.as_ref() {
-            handshake_with_callback(&self.ssl_acceptor, stream, cb).await
+        let mut stream = if let Some(offload) = self.offload.as_ref() {
+            let ssl_acceptor = self.ssl_acceptor.clone();
+            let callbacks = self.callbacks.clone();
+            offload
+                .spawn_abort_on_drop(stream.id() as u64, async move {
+                    check(&stream)?;
+                    let stream = if let Some(cb) = callbacks.as_ref() {
+                        handshake_with_callback(&ssl_acceptor, stream, cb.as_ref()).await?
+                    } else {
+                        handshake(&ssl_acceptor, stream).await?
+                    };
+                    Ok::<_, E>(stream)
+                })
+                .await
+                .or_err(InternalError, "TLS offload runtime failure")??
+        } else if let Some(cb) = self.callbacks.as_ref() {
+            handshake_with_callback(&self.ssl_acceptor, stream, cb.as_ref()).await?
         } else {
-            handshake(&self.ssl_acceptor, stream).await
+            handshake(&self.ssl_acceptor, stream).await?
+        };
+        if self.write_coalescing {
+            stream.enable_write_coalescing();
         }
+        Ok(stream)
     }
 }
 
@@ -140,12 +243,33 @@ mod alpn {
     use super::*;
     use crate::tls::ssl::{select_next_proto, AlpnError, SslRef};
 
-    fn valid_alpn(alpn_in: &[u8]) -> bool {
+    pub(super) fn valid_alpn(alpn_in: &[u8]) -> bool {
         if alpn_in.is_empty() {
             return false;
         }
         // TODO: can add more thorough validation here.
         true
+    }
+
+    /// Finds the first protocol in the client-offered ALPN list that matches the given protocol.
+    ///
+    /// This is a helper for ALPN negotiation. It iterates over the client's protocol list
+    /// (in wire format) and returns the first protocol that matches proto
+    /// The returned reference always points into `client_protocols`, so lifetimes are correct.
+    pub(super) fn select_protocol<'a>(
+        client_protocols: &'a [u8],
+        proto: &[u8],
+    ) -> Option<&'a [u8]> {
+        let mut bytes = client_protocols;
+        while !bytes.is_empty() {
+            let len = bytes[0] as usize;
+            bytes = &bytes[1..];
+            if len == proto.len() && &bytes[..len] == proto {
+                return Some(&bytes[..len]);
+            }
+            bytes = &bytes[len..];
+        }
+        None
     }
 
     // A standard implementation provided by the SSL lib is used below
@@ -178,5 +302,64 @@ mod alpn {
             Some(p) => Ok(p),
             _ => Err(AlpnError::ALERT_FATAL), // cannot agree
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn canceled_offloaded_handshake_drops_stream() {
+        let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
+        let key_path = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
+        let mut settings = TlsSettings::intermediate(&cert_path, &key_path).unwrap();
+        settings.set_offload_threadpool(1, 1);
+        let acceptor = settings.build();
+        let (mut client, server) = tokio::io::duplex(1024);
+
+        let mut handshake = Box::pin(acceptor.tls_handshake(server));
+        assert!(futures::poll!(handshake.as_mut()).is_pending());
+        drop(handshake);
+
+        let mut buf = [0];
+        let bytes_read = tokio::time::timeout(Duration::from_secs(1), client.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes_read, 0);
+    }
+
+    /// Accepts a TLS connection with `settings` and returns the server's stream.
+    async fn accept_with(settings: TlsSettings) -> SslStream<tokio::io::DuplexStream> {
+        use crate::tls::ssl::{Ssl, SslConnector, SslVerifyMode};
+
+        let acceptor = settings.build();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let client = tokio::spawn(async move {
+            let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+            connector.set_verify(SslVerifyMode::NONE);
+            let ssl = Ssl::new(&connector.build().into_context()).unwrap();
+            let mut stream = SslStream::new(ssl, client_io).unwrap();
+            stream.connect().await.unwrap();
+            stream
+        });
+        let server = acceptor.tls_handshake(server_io).await.unwrap();
+        client.await.unwrap();
+        server
+    }
+
+    #[tokio::test]
+    async fn accepted_streams_coalesce_writes_only_when_enabled() {
+        let cert_path = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
+        let key_path = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
+        let settings = TlsSettings::intermediate(&cert_path, &key_path).unwrap();
+        assert!(!accept_with(settings).await.write_coalescing());
+
+        let mut settings = TlsSettings::intermediate(&cert_path, &key_path).unwrap();
+        settings.enable_write_coalescing();
+        assert!(accept_with(settings).await.write_coalescing());
     }
 }
