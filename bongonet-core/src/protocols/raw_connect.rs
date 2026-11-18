@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 //! so that the protocol encapsulated can use the stream directly.
 //! This idea only works for CONNECT over HTTP 1.1 and localhost (or where the server is close by).
 
+use std::any::Any;
+
 use super::http::v1::client::HttpSession;
 use super::http::v1::common::*;
 use super::Stream;
@@ -35,7 +37,14 @@ use tokio::io::AsyncWriteExt;
 /// `request_header` should include the necessary request headers for the CONNECT protocol.
 ///
 /// When successful, a [`Stream`] will be returned which is the established CONNECT proxy connection.
-pub async fn connect(stream: Stream, request_header: &ReqHeader) -> Result<(Stream, ProxyDigest)> {
+pub async fn connect<P>(
+    stream: Stream,
+    request_header: &ReqHeader,
+    peer: &P,
+) -> Result<(Stream, ProxyDigest)>
+where
+    P: crate::upstreams::peer::Peer,
+{
     let mut http = HttpSession::new(stream);
 
     // We write to stream directly because HttpSession doesn't write req header in auth form
@@ -53,7 +62,7 @@ pub async fn connect(stream: Stream, request_header: &ReqHeader) -> Result<(Stre
     let resp_header = http.read_resp_header_parts().await?;
     Ok((
         http.underlying_stream,
-        validate_connect_response(resp_header)?,
+        validate_connect_response(resp_header, peer, request_header)?,
     ))
 }
 
@@ -104,11 +113,19 @@ where
 pub struct ProxyDigest {
     /// The response header the proxy returns
     pub response: Box<ResponseHeader>,
+    /// Optional arbitrary data.
+    pub user_data: Option<Box<dyn Any + Send + Sync>>,
 }
 
 impl ProxyDigest {
-    pub fn new(response: Box<ResponseHeader>) -> Self {
-        ProxyDigest { response }
+    pub fn new(
+        response: Box<ResponseHeader>,
+        user_data: Option<Box<dyn Any + Send + Sync>>,
+    ) -> Self {
+        ProxyDigest {
+            response,
+            user_data,
+        }
     }
 }
 
@@ -138,7 +155,7 @@ impl std::fmt::Display for ConnectProxyError {
         write!(
             f,
             "Failed CONNECT Response: status {}, proxy-status {reason}",
-            &self.response.status
+            self.response.status
         )
     }
 }
@@ -182,7 +199,14 @@ fn http_req_header_to_wire_auth_form(req: &ReqHeader) -> BytesMut {
 }
 
 #[inline]
-fn validate_connect_response(resp: Box<ResponseHeader>) -> Result<ProxyDigest> {
+fn validate_connect_response<P>(
+    resp: Box<ResponseHeader>,
+    peer: &P,
+    req: &ReqHeader,
+) -> Result<ProxyDigest>
+where
+    P: crate::upstreams::peer::Peer,
+{
     if !resp.status.is_success() {
         return Error::e_because(
             ConnectProxyFailure,
@@ -201,7 +225,11 @@ fn validate_connect_response(resp: Box<ResponseHeader>) -> Result<ProxyDigest> {
             ConnectProxyError::boxed_new(resp),
         );
     }
-    Ok(ProxyDigest::new(resp))
+
+    let user_data = peer
+        .proxy_digest_user_data_hook()
+        .and_then(|hook| hook(req, &resp));
+    Ok(ProxyDigest::new(resp, user_data))
 }
 
 #[cfg(test)]
@@ -214,14 +242,11 @@ mod test_sync {
     fn test_generate_connect_header() {
         let mut headers = BTreeMap::new();
         headers.insert(String::from("foo"), b"bar".to_vec());
-        let req = generate_connect_header("bongonet.khulnasoft.com", 123, headers.iter()).unwrap();
+        let req = generate_connect_header("bongonet.org", 123, headers.iter()).unwrap();
 
         assert_eq!(req.method, http::method::Method::CONNECT);
-        assert_eq!(req.uri.authority().unwrap(), "bongonet.khulnasoft.com:123");
-        assert_eq!(
-            req.headers.get("Host").unwrap(),
-            "bongonet.khulnasoft.com:123"
-        );
+        assert_eq!(req.uri.authority().unwrap(), "bongonet.org:123");
+        assert_eq!(req.headers.get("Host").unwrap(), "bongonet.org:123");
         assert_eq!(req.headers.get("foo").unwrap(), "bar");
     }
 
@@ -241,51 +266,94 @@ mod test_sync {
     fn test_request_to_wire_auth_form() {
         let new_request = http::Request::builder()
             .method("CONNECT")
-            .uri("https://bongonet.khulnasoft.com:123/")
+            .uri("https://bongonet.org:123/")
             .header("Foo", "Bar")
             .body(())
             .unwrap();
         let (new_request, _) = new_request.into_parts();
         let wire = http_req_header_to_wire_auth_form(&new_request);
         assert_eq!(
-            &b"CONNECT bongonet.khulnasoft.com:123 HTTP/1.1\r\nfoo: Bar\r\n\r\n"[..],
+            &b"CONNECT bongonet.org:123 HTTP/1.1\r\nfoo: Bar\r\n\r\n"[..],
             &wire
         );
     }
 
     #[test]
     fn test_validate_connect_response() {
+        use crate::upstreams::peer::BasicPeer;
+
+        struct DummyUserData {
+            some_num: i32,
+            some_string: String,
+        }
+
+        let peer_no_data = BasicPeer::new("127.0.0.1:80");
+        let mut peer_with_data = peer_no_data.clone();
+        peer_with_data.options.proxy_digest_user_data_hook = Some(std::sync::Arc::new(
+            |_req: &http::request::Parts, _resp: &bongonet_http::ResponseHeader| {
+                Some(Box::new(DummyUserData {
+                    some_num: 42,
+                    some_string: "test".to_string(),
+                }) as Box<dyn std::any::Any + Send + Sync>)
+            },
+        ));
+
+        let request = http::Request::builder()
+            .method("CONNECT")
+            .uri("https://example.com:443/")
+            .body(())
+            .unwrap();
+        let (req_header, _) = request.into_parts();
+
         let resp = ResponseHeader::build(200, None).unwrap();
-        validate_connect_response(Box::new(resp)).unwrap();
+        let proxy_digest =
+            validate_connect_response(Box::new(resp), &peer_with_data, &req_header).unwrap();
+        assert!(proxy_digest.user_data.is_some());
+        let user_data = proxy_digest
+            .user_data
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<DummyUserData>()
+            .unwrap();
+        assert_eq!(user_data.some_num, 42);
+        assert_eq!(user_data.some_string, "test");
+
+        let resp = ResponseHeader::build(200, None).unwrap();
+        let proxy_digest =
+            validate_connect_response(Box::new(resp), &peer_no_data, &req_header).unwrap();
+        assert!(proxy_digest.user_data.is_none());
 
         let resp = ResponseHeader::build(404, None).unwrap();
-        assert!(validate_connect_response(Box::new(resp)).is_err());
+        assert!(validate_connect_response(Box::new(resp), &peer_with_data, &req_header).is_err());
 
         let mut resp = ResponseHeader::build(200, None).unwrap();
         resp.append_header("content-length", 0).unwrap();
-        assert!(validate_connect_response(Box::new(resp)).is_ok());
+        assert!(validate_connect_response(Box::new(resp), &peer_no_data, &req_header).is_ok());
 
         let mut resp = ResponseHeader::build(200, None).unwrap();
         resp.append_header("transfer-encoding", 0).unwrap();
-        assert!(validate_connect_response(Box::new(resp)).is_err());
+        assert!(validate_connect_response(Box::new(resp), &peer_no_data, &req_header).is_err());
     }
 
     #[tokio::test]
     async fn test_connect_write_request() {
-        let wire = b"CONNECT bongonet.khulnasoft.com:123 HTTP/1.1\r\nhost: bongonet.khulnasoft.com:123\r\n\r\n";
+        use crate::upstreams::peer::BasicPeer;
+
+        let wire = b"CONNECT bongonet.org:123 HTTP/1.1\r\nhost: bongonet.org:123\r\n\r\n";
         let mock_io = Box::new(Builder::new().write(wire).build());
 
         let headers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        let req = generate_connect_header("bongonet.khulnasoft.com", 123, headers.iter()).unwrap();
+        let req = generate_connect_header("bongonet.org", 123, headers.iter()).unwrap();
+        let peer = BasicPeer::new("127.0.0.1:123");
         // ConnectionClosed
-        assert!(connect(mock_io, &req).await.is_err());
+        assert!(connect(mock_io, &req, &peer).await.is_err());
 
-        let to_wire = b"CONNECT bongonet.khulnasoft.com:123 HTTP/1.1\r\nhost: bongonet.khulnasoft.com:123\r\n\r\n";
+        let to_wire = b"CONNECT bongonet.org:123 HTTP/1.1\r\nhost: bongonet.org:123\r\n\r\n";
         let from_wire = b"HTTP/1.1 200 OK\r\n\r\n";
         let mock_io = Box::new(Builder::new().write(to_wire).read(from_wire).build());
 
-        let req = generate_connect_header("bongonet.khulnasoft.com", 123, headers.iter()).unwrap();
-        let result = connect(mock_io, &req).await;
+        let req = generate_connect_header("bongonet.org", 123, headers.iter()).unwrap();
+        let result = connect(mock_io, &req, &peer).await;
         assert!(result.is_ok());
     }
 }

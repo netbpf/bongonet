@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 //! TLS server specific implementation
 
-use crate::listeners::TlsAcceptCallbacks;
+use crate::listeners::TlsAccept;
 use crate::protocols::tls::SslStream;
 use crate::protocols::{Shutdown, IO};
 use crate::tls::ext;
@@ -49,7 +49,7 @@ pub async fn handshake<S: IO>(ssl_acceptor: &SslAcceptor, io: S) -> Result<SslSt
 pub async fn handshake_with_callback<S: IO>(
     ssl_acceptor: &SslAcceptor,
     io: S,
-    callbacks: &TlsAcceptCallbacks,
+    callbacks: &(dyn TlsAccept + Send + Sync),
 ) -> Result<SslStream<S>> {
     let mut tls_stream = prepare_tls_stream(ssl_acceptor, io)?;
     let done = Pin::new(&mut tls_stream)
@@ -57,17 +57,25 @@ pub async fn handshake_with_callback<S: IO>(
         .await
         .explain_err(TLSHandshakeFailure, |e| format!("TLS accept() failed: {e}"))?;
     if !done {
+        let downstream_fd = tls_stream.get_ref().id();
         // safety: we do hold a mut ref of tls_stream
         let ssl_mut = unsafe { ext::ssl_mut(tls_stream.ssl()) };
+        ext::set_downstream_fd(ssl_mut, downstream_fd);
         callbacks.certificate_callback(ssl_mut).await;
         Pin::new(&mut tls_stream)
             .resume_accept()
             .await
             .explain_err(TLSHandshakeFailure, |e| format!("TLS accept() failed: {e}"))?;
-        Ok(tls_stream)
-    } else {
-        Ok(tls_stream)
     }
+    {
+        let ssl = tls_stream.ssl();
+        if let Some(extension) = callbacks.handshake_complete_callback(ssl).await {
+            if let Some(digest_mut) = tls_stream.ssl_digest_mut() {
+                digest_mut.extension.set(extension);
+            }
+        }
+    }
+    Ok(tls_stream)
 }
 
 #[async_trait]
@@ -130,56 +138,115 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin> ResumableAccept for SslStream<S> 
     }
 }
 
-#[tokio::test]
-#[cfg(feature = "any_tls")]
-async fn test_async_cert() {
-    use crate::protocols::tls::TlsRef;
-    use tokio::io::AsyncReadExt;
+#[cfg(test)]
+mod tests {
+    use super::handshake_with_callback;
 
     use crate::listeners::{TlsAccept, TlsAcceptCallbacks};
-    let acceptor = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls())
-        .unwrap()
-        .build();
+    use crate::protocols::tls::SslStream;
+    use crate::protocols::tls::TlsRef;
+    use crate::tls::ext;
+    use crate::tls::ssl;
 
-    struct Callback;
-    #[async_trait]
-    impl TlsAccept for Callback {
-        async fn certificate_callback(&self, ssl: &mut TlsRef) -> () {
-            assert_eq!(
-                ssl.servername(ssl::NameType::HOST_NAME).unwrap(),
-                "bongonet.khulnasoft.com"
-            );
-            let cert = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
-            let key = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
+    use async_trait::async_trait;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use tokio::io::DuplexStream;
 
-            let cert_bytes = std::fs::read(cert).unwrap();
-            let cert = crate::tls::x509::X509::from_pem(&cert_bytes).unwrap();
-
-            let key_bytes = std::fs::read(key).unwrap();
-            let key = crate::tls::pkey::PKey::private_key_from_pem(&key_bytes).unwrap();
-            ext::ssl_use_certificate(ssl, &cert).unwrap();
-            ext::ssl_use_private_key(ssl, &key).unwrap();
-        }
-    }
-
-    let cb: TlsAcceptCallbacks = Box::new(Callback);
-
-    let (client, server) = tokio::io::duplex(1024);
-
-    tokio::spawn(async move {
+    async fn client_task(client: DuplexStream) {
+        use tokio::io::AsyncReadExt;
         let ssl_context = ssl::SslContext::builder(ssl::SslMethod::tls())
             .unwrap()
             .build();
         let mut ssl = ssl::Ssl::new(&ssl_context).unwrap();
-        ssl.set_hostname("bongonet.khulnasoft.com").unwrap();
+        ssl.set_hostname("bongonet.org").unwrap();
         ssl.set_verify(ssl::SslVerifyMode::NONE); // we don have a valid cert
         let mut stream = SslStream::new(ssl, client).unwrap();
         Pin::new(&mut stream).connect().await.unwrap();
         let mut buf = [0; 1];
         let _ = stream.read(&mut buf).await;
-    });
+    }
 
-    handshake_with_callback(&acceptor, server, &cb)
-        .await
-        .unwrap();
+    #[tokio::test]
+    #[cfg(feature = "any_tls")]
+    async fn test_async_cert() {
+        let acceptor = ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls())
+            .unwrap()
+            .build();
+
+        struct Callback;
+        #[async_trait]
+        impl TlsAccept for Callback {
+            async fn certificate_callback(&self, ssl: &mut TlsRef) -> () {
+                assert_eq!(ext::get_downstream_fd(ssl), Some(0));
+                assert_eq!(
+                    ssl.servername(ssl::NameType::HOST_NAME).unwrap(),
+                    "bongonet.org"
+                );
+                let cert = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
+                let key = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
+
+                let cert_bytes = std::fs::read(cert).unwrap();
+                let cert = crate::tls::x509::X509::from_pem(&cert_bytes).unwrap();
+
+                let key_bytes = std::fs::read(key).unwrap();
+                let key = crate::tls::pkey::PKey::private_key_from_pem(&key_bytes).unwrap();
+                ext::ssl_use_certificate(ssl, &cert).unwrap();
+                ext::ssl_use_private_key(ssl, &key).unwrap();
+            }
+        }
+
+        let cb: TlsAcceptCallbacks = Box::new(Callback);
+
+        let (client, server) = tokio::io::duplex(1024);
+
+        tokio::spawn(client_task(client));
+
+        handshake_with_callback(&acceptor, server, cb.as_ref())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "openssl_derived")]
+    async fn test_handshake_complete_callback() {
+        use crate::tls::ssl::SslFiletype;
+
+        let cert = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
+        let key = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
+
+        let acceptor = {
+            let mut builder =
+                ssl::SslAcceptor::mozilla_intermediate_v5(ssl::SslMethod::tls()).unwrap();
+            builder.set_certificate_chain_file(cert).unwrap();
+            builder.set_private_key_file(key, SslFiletype::PEM).unwrap();
+            builder.build()
+        };
+
+        struct Sni(String);
+        struct Callback;
+        #[async_trait]
+        impl TlsAccept for Callback {
+            async fn handshake_complete_callback(
+                &self,
+                ssl: &TlsRef,
+            ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+                let sni = ssl.servername(ssl::NameType::HOST_NAME)?.to_string();
+                Some(Arc::new(Sni(sni)))
+            }
+        }
+
+        let cb: TlsAcceptCallbacks = Box::new(Callback);
+
+        let (client, server) = tokio::io::duplex(1024);
+
+        tokio::spawn(client_task(client));
+
+        let stream = handshake_with_callback(&acceptor, server, cb.as_ref())
+            .await
+            .unwrap();
+        let ssl_digest = stream.ssl_digest().unwrap();
+        let sni = ssl_digest.extension.get::<Sni>().unwrap();
+        assert_eq!(sni.0, "bongonet.org");
+    }
 }

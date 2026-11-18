@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,8 +26,6 @@ use crate::tls::ext::{
     ssl_set_renegotiate_mode_freely, ssl_set_verify_cert_store, ssl_use_certificate,
     ssl_use_private_key, ssl_use_second_key_share,
 };
-#[cfg(feature = "boringssl")]
-use crate::tls::ssl::SslCurve;
 use crate::tls::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode, SslVersion};
 use crate::tls::x509::store::X509StoreBuilder;
 use crate::upstreams::peer::{Peer, ALPN};
@@ -52,17 +50,21 @@ const CIPHER_LIST: &str = "AES-128-GCM-SHA256\
 /**
  * Enabled signature algorithms for signing/verification (ECDSA).
  * As of 4/10/2023, the only addition to boringssl's defaults is ECDSA_SECP521R1_SHA512.
+ *
+ * N.B. BoringSSL 5.x uses case-sensitive parsing for signature algorithm names,
+ * so these must be in lowercase wire format.
  */
-const SIGALG_LIST: &str = "ECDSA_SECP256R1_SHA256\
-    :RSA_PSS_RSAE_SHA256\
-    :RSA_PKCS1_SHA256\
-    :ECDSA_SECP384R1_SHA384\
-    :RSA_PSS_RSAE_SHA384\
-    :RSA_PKCS1_SHA384\
-    :RSA_PSS_RSAE_SHA512\
-    :RSA_PKCS1_SHA512\
-    :RSA_PKCS1_SHA1\
-    :ECDSA_SECP521R1_SHA512";
+const SIGALG_LIST: &str = "ecdsa_secp256r1_sha256\
+    :rsa_pss_rsae_sha256\
+    :rsa_pkcs1_sha256\
+    :ecdsa_secp384r1_sha384\
+    :rsa_pss_rsae_sha384\
+    :rsa_pkcs1_sha384\
+    :rsa_pss_rsae_sha512\
+    :rsa_pkcs1_sha512\
+    :rsa_pkcs1_sha1\
+    :ecdsa_secp521r1_sha512";
+
 /**
  * Enabled curves for ECDHE (signature key exchange).
  * As of 4/10/2023, the only addition to boringssl's defaults is SECP521R1.
@@ -72,12 +74,7 @@ const SIGALG_LIST: &str = "ECDSA_SECP256R1_SHA256\
  * that are both computationally cheaper and more supported.
  */
 #[cfg(feature = "boringssl")]
-const BORINGSSL_CURVE_LIST: &[SslCurve] = &[
-    SslCurve::X25519,
-    SslCurve::SECP256R1,
-    SslCurve::SECP384R1,
-    SslCurve::SECP521R1,
-];
+const BORINGSSL_CURVES_LIST: &str = "X25519:P-256:P-384:P-521";
 
 static INIT_CA_ENV: Once = Once::new();
 fn init_ssl_cert_env_vars() {
@@ -100,11 +97,9 @@ impl Connector {
         // Set supported ciphers.
         builder.set_cipher_list(CIPHER_LIST).unwrap();
         // Set supported signature algorithms and ECDH (key exchange) curves.
-        builder
-            .set_sigalgs_list(&SIGALG_LIST.to_lowercase())
-            .unwrap();
+        builder.set_sigalgs_list(SIGALG_LIST).unwrap();
         #[cfg(feature = "boringssl")]
-        builder.set_curves(BORINGSSL_CURVE_LIST).unwrap();
+        builder.set_curves_list(BORINGSSL_CURVES_LIST).unwrap();
         builder
             .set_max_proto_version(Some(SslVersion::TLS1_3))
             .unwrap();
@@ -120,9 +115,7 @@ impl Connector {
                 builder.set_default_verify_paths().unwrap();
             }
             if let Some((cert, key)) = conf.cert_key_file.as_ref() {
-                builder
-                    .set_certificate_file(cert, SslFiletype::PEM)
-                    .unwrap();
+                builder.set_certificate_chain_file(cert).unwrap();
 
                 builder.set_private_key_file(key, SslFiletype::PEM).unwrap();
             }
@@ -195,22 +188,22 @@ where
         }
     }
 
-    if let Some(curve) = peer.get_peer_options().and_then(|o| o.curves) {
+    if let Some(curve) = peer.get_peer_options().and_then(|o| o.curves.as_deref()) {
         ssl_set_groups_list(&mut ssl_conf, curve).or_err(InternalError, "invalid curves")?;
     }
 
     // second_keyshare is default true
-    if !peer.get_peer_options().map_or(true, |o| o.second_keyshare) {
+    if !peer.get_peer_options().is_none_or(|o| o.second_keyshare) {
         ssl_use_second_key_share(&mut ssl_conf, false);
     }
 
     // disable verification if sni does not exist
     // XXX: verify on empty string cause null string seg fault
-    if peer.sni().is_empty() {
+    let verify_mode = if peer.sni().is_empty() {
         ssl_conf.set_use_server_name_indication(false);
         /* NOTE: technically we can still verify who signs the cert but turn it off to be
         consistent with nginx's behavior */
-        ssl_conf.set_verify(SslVerifyMode::NONE);
+        SslVerifyMode::NONE
     } else if peer.verify_cert() {
         if peer.verify_hostname() {
             let verify_param = ssl_conf.param_mut();
@@ -229,9 +222,15 @@ where
                 }
             }
         }
-        ssl_conf.set_verify(SslVerifyMode::PEER);
+        SslVerifyMode::PEER
     } else {
-        ssl_conf.set_verify(SslVerifyMode::NONE);
+        SslVerifyMode::NONE
+    };
+    match peer.upstream_tls_verify_callback().cloned() {
+        Some(callback) => {
+            ssl_conf.set_verify_callback(verify_mode, move |ok, ctx| callback(ok, ctx))
+        }
+        None => ssl_conf.set_verify(verify_mode),
     }
 
     /*
@@ -248,9 +247,13 @@ where
     }
 
     clear_error_stack();
-    let connect_future = handshake(ssl_conf, peer.sni(), stream);
 
-    match peer.connection_timeout() {
+    let complete_hook = peer
+        .get_peer_options()
+        .and_then(|o| o.upstream_tls_handshake_complete_hook.clone());
+    let connect_future = handshake(ssl_conf, peer.sni(), stream, complete_hook);
+
+    let mut stream = match peer.connection_timeout() {
         Some(t) => match bongonet_timeout::timeout(t, connect_future).await {
             Ok(res) => res,
             Err(_) => Error::e_explain(
@@ -259,5 +262,173 @@ where
             ),
         },
         None => connect_future.await,
+    }?;
+    if peer
+        .get_peer_options()
+        .is_some_and(|o| o.tls_write_coalescing)
+    {
+        stream.enable_write_coalescing();
+    }
+    Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::tls::server::handshake as accept;
+    use crate::protocols::tls::VerifyCallback;
+    use crate::tls::pkey::PKey;
+    use crate::tls::ssl::SslAcceptor;
+    use crate::tls::x509::X509;
+    use crate::upstreams::peer::{BasicPeer, HttpPeer};
+    use std::sync::Mutex;
+    use tokio::io::DuplexStream;
+
+    // `verify-leaf.crt` is issued to `verify.test` by `verify-ca.crt`; both expire in 2126.
+    const SNI: &str = "verify.test";
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(format!("{}/tests/certs/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    fn peer(trust_ca: bool, callback: VerifyCallback) -> BasicPeer {
+        let mut peer = BasicPeer::new("127.0.0.1:443");
+        peer.sni = SNI.to_string();
+        if trust_ca {
+            let ca = X509::from_pem(&fixture("verify-ca.crt")).unwrap();
+            peer.options.ca = Some(Arc::new(vec![ca].into_boxed_slice()));
+        }
+        peer.options.upstream_tls_verify_callback = Some(callback);
+        peer
+    }
+
+    /// Returns a callback that records `(preverify_ok, depth, chain length)` for each call and
+    /// returns `verdict(preverify_ok)`.
+    fn recording(
+        verdict: fn(bool) -> bool,
+    ) -> (VerifyCallback, Arc<Mutex<Vec<(bool, u32, usize)>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let callback: VerifyCallback = Arc::new(move |ok, ctx| {
+            let chain_len = ctx.chain().map_or(0, |c| c.len());
+            recorded
+                .lock()
+                .unwrap()
+                .push((ok, ctx.error_depth(), chain_len));
+            verdict(ok)
+        });
+        (callback, calls)
+    }
+
+    /// Runs a TLS handshake from `connect` against a server presenting the fixture leaf.
+    async fn handshake_with_fixture_server(peer: &BasicPeer) -> Result<()> {
+        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
+        builder
+            .set_certificate(&X509::from_pem(&fixture("verify-leaf.crt")).unwrap())
+            .unwrap();
+        builder
+            .set_private_key(&PKey::private_key_from_pem(&fixture("verify-leaf.key")).unwrap())
+            .unwrap();
+        let acceptor = builder.build();
+        let (client, server) = tokio::io::duplex(16 * 1024);
+        let server = tokio::spawn(async move {
+            let _ = accept(&acceptor, server).await;
+        });
+        let connector = super::Connector::new(None);
+        let result = connect(client, peer, None, &connector.ctx)
+            .await
+            .map(|_| ());
+        server.abort();
+        result
+    }
+
+    #[tokio::test]
+    async fn verify_callback_observes_verified_chain() {
+        let (callback, calls) = recording(|ok| ok);
+        handshake_with_fixture_server(&peer(true, callback))
+            .await
+            .unwrap();
+
+        // the CA, then the leaf, each with the whole chain built
+        assert_eq!(*calls.lock().unwrap(), [(true, 1, 2), (true, 0, 2)]);
+    }
+
+    #[tokio::test]
+    async fn verify_callback_can_reject_verified_chain() {
+        let (callback, calls) = recording(|_| false);
+        let err = handshake_with_fixture_server(&peer(true, callback))
+            .await
+            .unwrap_err();
+
+        // verification stops at the rejected CA
+        assert_eq!(*calls.lock().unwrap(), [(true, 1, 2)]);
+        assert!(err.to_string().contains("TLS connect() failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn verify_callback_runs_when_verification_is_off() {
+        let (callback, calls) = recording(|_| false);
+        let mut peer = peer(false, callback);
+        peer.options.verify_cert = false;
+        // the CA is not trusted, and even rejecting cannot fail the handshake
+        handshake_with_fixture_server(&peer).await.unwrap();
+
+        // the leaf's issuer is missing
+        assert_eq!(*calls.lock().unwrap(), [(false, 0, 1)]);
+    }
+
+    #[tokio::test]
+    async fn verify_callback_sees_hostname_mismatch_once() {
+        let (callback, calls) = recording(|ok| ok);
+        let mut peer = peer(true, callback);
+        peer.sni = "other.test".to_string();
+        handshake_with_fixture_server(&peer).await.unwrap_err();
+
+        // the hostname is checked before the chain's signatures, so the leaf fails without an
+        // earlier successful call
+        assert_eq!(*calls.lock().unwrap(), [(false, 0, 2)]);
+    }
+
+    #[tokio::test]
+    async fn verify_callback_runs_without_sni() {
+        let (callback, calls) = recording(|ok| ok);
+        let mut peer = peer(true, callback);
+        peer.sni.clear();
+        handshake_with_fixture_server(&peer).await.unwrap();
+
+        assert_eq!(*calls.lock().unwrap(), [(true, 1, 2), (true, 0, 2)]);
+    }
+
+    /// Connects to `peer` with the default connector, with a local TLS server on the other end
+    /// of a duplex, and returns the client's stream.
+    async fn connect_locally(peer: &HttpPeer) -> SslStream<DuplexStream> {
+        let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
+        let dir = env!("CARGO_MANIFEST_DIR");
+        acceptor
+            .set_certificate_chain_file(format!("{dir}/tests/keys/server.crt"))
+            .unwrap();
+        acceptor
+            .set_private_key_file(format!("{dir}/tests/keys/key.pem"), SslFiletype::PEM)
+            .unwrap();
+        let acceptor = acceptor.build();
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move { accept(&acceptor, server_io).await.unwrap() });
+
+        let connector = Connector::new(None);
+        let stream = connect(client_io, peer, None, &connector.ctx)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        stream
+    }
+
+    #[tokio::test]
+    async fn upstream_streams_coalesce_writes_only_when_the_peer_enables_it() {
+        let mut peer = HttpPeer::new("127.0.0.1:443", true, "bongonet.org".into()).unwrap();
+        peer.options.verify_cert = false;
+        assert!(!connect_locally(&peer).await.write_coalescing());
+
+        peer.options.tls_write_coalescing = true;
+        assert!(connect_locally(&peer).await.write_coalescing());
     }
 }

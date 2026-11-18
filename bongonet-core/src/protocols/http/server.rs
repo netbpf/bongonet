@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,39 +14,131 @@
 
 //! HTTP server session APIs
 
+use super::custom::server::Session as SessionCustom;
 use super::error_resp;
+use super::subrequest::server::HttpSession as SessionSubrequest;
 use super::v1::server::HttpSession as SessionV1;
-use super::v2::server::HttpSession as SessionV2;
+use super::v2::server::{HttpSession as SessionV2, Idle};
 use super::HttpTask;
+use crate::custom_session;
 use crate::protocols::{Digest, SocketAddr, Stream};
-use bongonet_error::Result;
+use bongonet_error::{Error, Result};
 use bongonet_http::{RequestHeader, ResponseHeader};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::HeaderValue;
 use http::{header::AsHeaderName, HeaderMap};
-use log::error;
+use std::any::Any;
 use std::time::Duration;
 
-/// HTTP server session object for both HTTP/1.x and HTTP/2
-pub enum Session {
-    H1(SessionV1),
-    H2(SessionV2),
+/// A reusable HTTP/1.x stream and bytes already read for the next request.
+#[derive(Debug)]
+pub struct ReusableHttpStream {
+    stream: Stream,
+    pipelined_prefix: Option<BytesMut>,
 }
 
-impl Session {
+impl ReusableHttpStream {
+    pub(crate) fn new(stream: Stream, pipelined_prefix: Option<BytesMut>) -> Self {
+        Self {
+            stream,
+            pipelined_prefix,
+        }
+    }
+
+    /// Split the reusable connection into its underlying stream and optional
+    /// bytes already read for the next pipelined request.
+    pub fn into_parts(self) -> (Stream, Option<BytesMut>) {
+        (self.stream, self.pipelined_prefix)
+    }
+}
+
+/// HTTP server session object for both HTTP/1.x and HTTP/2
+pub enum Session<CS = ()>
+where
+    CS: SessionCustom,
+{
+    H1(SessionV1),
+    H2(SessionV2),
+    Subrequest(SessionSubrequest),
+    Custom(CS),
+}
+
+impl Session<()> {
     /// Create a new [`Session`] from an established connection for HTTP/1.x
     pub fn new_http1(stream: Stream) -> Self {
-        Self::H1(SessionV1::new(stream))
+        Self::new_http1_with_custom_session(stream)
     }
 
     /// Create a new [`Session`] from an established HTTP/2 stream
     pub fn new_http2(session: SessionV2) -> Self {
+        Self::new_http2_with_custom_session(session)
+    }
+
+    /// Create a new [`Session`] from a subrequest session
+    pub fn new_subrequest(session: SessionSubrequest) -> Self {
+        Self::new_subrequest_with_custom_session(session)
+    }
+}
+
+impl<CS> Session<CS>
+where
+    CS: SessionCustom,
+{
+    /// Create a new [`Session`] with a concrete custom-session type from an
+    /// established connection for HTTP/1.x.
+    pub fn new_http1_with_custom_session(stream: Stream) -> Self {
+        Self::H1(SessionV1::new(stream))
+    }
+
+    /// Create a new [`Session`] with a concrete custom-session type from an
+    /// established HTTP/2 stream.
+    pub fn new_http2_with_custom_session(session: SessionV2) -> Self {
         Self::H2(session)
+    }
+
+    /// Create a new [`Session`] with a concrete custom-session type from a
+    /// subrequest session.
+    pub fn new_subrequest_with_custom_session(session: SessionSubrequest) -> Self {
+        Self::Subrequest(session)
+    }
+
+    /// Create a new [`Session`] from a custom session
+    pub fn new_custom(session: CS) -> Self {
+        Self::Custom(session)
     }
 
     /// Whether the session is HTTP/2. If not it is HTTP/1.x
     pub fn is_http2(&self) -> bool {
         matches!(self, Self::H2(_))
+    }
+
+    /// Whether the session is for a subrequest.
+    pub fn is_subrequest(&self) -> bool {
+        matches!(self, Self::Subrequest(_))
+    }
+
+    /// Whether the session is Custom
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Self::Custom(_))
+    }
+
+    /// Whether an upgraded session should keep polling after request-body completion.
+    ///
+    /// Custom transports can use the idle poll to observe an out-of-band reset after
+    /// request EOF. HTTP/1 and subrequest sessions must leave the completed request
+    /// unpolled because their idle read can treat a valid half-close as a disconnect.
+    pub fn poll_after_upgrade(&self) -> bool {
+        matches!(self, Self::Custom(_))
+    }
+
+    /// Return a stable, human-readable label for this downstream session type.
+    pub fn session_type(&self) -> &'static str {
+        match self {
+            Self::H1(_) => "h1",
+            Self::H2(_) => "h2",
+            Self::Subrequest(_) => "subrequest",
+            Self::Custom(_) => "custom",
+        }
     }
 
     /// Read the request header. This method is required to be called first before doing anything
@@ -62,6 +154,11 @@ impl Session {
             }
             // This call will always return `Ok(true)` for Http2 because the request is already read
             Self::H2(_) => Ok(true),
+            Self::Subrequest(s) => {
+                let read = s.read_request().await?;
+                Ok(read.is_some())
+            }
+            Self::Custom(_) => Ok(true),
         }
     }
 
@@ -72,6 +169,8 @@ impl Session {
         match self {
             Self::H1(s) => s.req_header(),
             Self::H2(s) => s.req_header(),
+            Self::Subrequest(s) => s.req_header(),
+            Self::Custom(s) => s.req_header(),
         }
     }
 
@@ -82,6 +181,8 @@ impl Session {
         match self {
             Self::H1(s) => s.req_header_mut(),
             Self::H2(s) => s.req_header_mut(),
+            Self::Subrequest(s) => s.req_header_mut(),
+            Self::Custom(s) => s.req_header_mut(),
         }
     }
 
@@ -104,6 +205,8 @@ impl Session {
         match self {
             Self::H1(s) => s.read_body_bytes().await,
             Self::H2(s) => s.read_body_bytes().await,
+            Self::Subrequest(s) => s.read_body_bytes().await,
+            Self::Custom(s) => s.read_body_bytes().await,
         }
     }
 
@@ -112,12 +215,11 @@ impl Session {
     /// This is useful for making streams reusable (in particular for HTTP/1.1) after returning an
     /// error before the whole body has been read.
     pub async fn drain_request_body(&mut self) -> Result<()> {
-        loop {
-            match self.read_request_body().await {
-                Ok(Some(_)) => { /* continue to drain */ }
-                Ok(None) => return Ok(()), // done
-                Err(e) => return Err(e),
-            }
+        match self {
+            Self::H1(s) => s.drain_request_body().await,
+            Self::H2(s) => s.drain_request_body().await,
+            Self::Subrequest(s) => s.drain_request_body().await,
+            Self::Custom(s) => s.drain_request_body().await,
         }
     }
 
@@ -131,6 +233,11 @@ impl Session {
                 Ok(())
             }
             Self::H2(s) => s.write_response_header(resp, false),
+            Self::Subrequest(s) => {
+                s.write_response_header(resp).await?;
+                Ok(())
+            }
+            Self::Custom(s) => s.write_response_header(resp, false).await,
         }
     }
 
@@ -142,6 +249,11 @@ impl Session {
                 Ok(())
             }
             Self::H2(s) => s.write_response_header_ref(resp, false),
+            Self::Subrequest(s) => {
+                s.write_response_header_ref(resp).await?;
+                Ok(())
+            }
+            Self::Custom(s) => s.write_response_header_ref(resp, false).await,
         }
     }
 
@@ -155,10 +267,20 @@ impl Session {
         }
         match self {
             Self::H1(s) => {
-                s.write_body(&data).await?;
+                if !data.is_empty() {
+                    s.write_body(&data).await?;
+                }
+                if end {
+                    s.finish_body().await?;
+                }
                 Ok(())
             }
             Self::H2(s) => s.write_body(data, end).await,
+            Self::Subrequest(s) => {
+                s.write_body(data).await?;
+                Ok(())
+            }
+            Self::Custom(s) => s.write_body(data, end).await,
         }
     }
 
@@ -167,23 +289,51 @@ impl Session {
         match self {
             Self::H1(_) => Ok(()), // TODO: support trailers for h1
             Self::H2(s) => s.write_trailers(trailers),
+            Self::Subrequest(s) => s.write_trailers(Some(Box::new(trailers))).await,
+            Self::Custom(s) => s.write_trailers(trailers).await,
         }
     }
 
-    /// Finish the life of this request.
-    /// For H1, if connection reuse is supported, a Some(Stream) will be returned, otherwise None.
+    /// Finish the life of this request and return a reusable stream, if any.
+    ///
+    /// For H1, if connection reuse is supported, a reusable stream will be returned,
+    /// otherwise None.
     /// For H2, always return None because H2 stream is not reusable.
-    pub async fn finish(self) -> Result<Option<Stream>> {
+    /// For subrequests, there is no true underlying stream to return.
+    pub async fn finish(self) -> Result<Option<ReusableHttpStream>> {
         match self {
             Self::H1(mut s) => {
                 // need to flush body due to buffering
                 s.finish_body().await?;
-                Ok(s.reuse().await)
+                s.reuse().await
             }
             Self::H2(mut s) => {
                 s.finish()?;
                 Ok(None)
             }
+            Self::Subrequest(mut s) => {
+                s.finish().await?;
+                Ok(None)
+            }
+            Self::Custom(mut s) => {
+                s.finish().await?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Callback for cleanup logic on downstream specifically when we fail to proxy the session
+    /// other than cleanup via finish().
+    ///
+    /// If caching the downstream failure may be independent of (and precede) an upstream error in
+    /// which case this function may be called more than once.
+    pub fn on_proxy_failure(&mut self, e: Box<Error>) {
+        match self {
+            Self::H1(_) | Self::H2(_) | Self::Custom(_) => {
+                // all cleanup logic handled in finish(),
+                // stream and resources dropped when session dropped
+            }
+            Self::Subrequest(ref mut s) => s.on_proxy_failure(e),
         }
     }
 
@@ -191,15 +341,78 @@ impl Session {
         match self {
             Self::H1(s) => s.response_duplex_vec(tasks).await,
             Self::H2(s) => s.response_duplex_vec(tasks).await,
+            Self::Subrequest(s) => s.response_duplex_vec(tasks).await,
+            Self::Custom(s) => s.response_duplex_vec(tasks).await,
         }
     }
 
     /// Set connection reuse. `duration` defines how long the connection is kept open for the next
-    /// request to reuse. Noop for h2
+    /// request to reuse. Noop for h2 and subrequest
     pub fn set_keepalive(&mut self, duration: Option<u64>) {
         match self {
             Self::H1(s) => s.set_server_keepalive(duration),
             Self::H2(_) => {}
+            Self::Subrequest(_) => {}
+            Self::Custom(_) => {}
+        }
+    }
+
+    /// Get the keepalive timeout. None if keepalive is disabled. Not applicable for h2 or
+    /// subrequest
+    pub fn get_keepalive(&self) -> Option<u64> {
+        match self {
+            Self::H1(s) => s.get_keepalive_timeout(),
+            Self::H2(_) => None,
+            Self::Subrequest(_) => None,
+            Self::Custom(_) => None,
+        }
+    }
+
+    /// Set the number of times the upstream connection connection for this
+    /// session can be reused via keepalive. Noop for h2 and subrequest
+    pub fn set_keepalive_reuses_remaining(&mut self, reuses: Option<u32>) {
+        if let Self::H1(s) = self {
+            s.set_keepalive_reuses_remaining(reuses);
+        }
+    }
+
+    /// Get the number of times the upstream connection connection for this
+    /// session can be reused via keepalive. Not applicable for h2 or
+    /// subrequest
+    pub fn get_keepalive_reuses_remaining(&self) -> Option<u32> {
+        if let Self::H1(s) = self {
+            s.get_keepalive_reuses_remaining()
+        } else {
+            None
+        }
+    }
+
+    /// Set the maximum number of fields accepted in an HTTP/1 request head.
+    ///
+    /// This is a no-op for non-HTTP/1 sessions.
+    pub fn set_h1_header_count_limit(&mut self, limit: super::v1::HeaderLimit) {
+        if let Self::H1(session) = self {
+            session.set_header_count_limit(limit);
+        }
+    }
+
+    /// Set user-defined context to carry across requests on the same keepalive connection.
+    ///
+    /// Only applicable for HTTP/1.x connections; noop for h2, subrequest, and custom sessions.
+    pub fn set_connection_user_context(&mut self, ctx: Option<Box<dyn Any + Send + Sync>>) {
+        if let Self::H1(s) = self {
+            s.set_connection_user_context(ctx);
+        }
+    }
+
+    /// Take the user-defined context from the previous request on this keepalive connection.
+    ///
+    /// Returns `None` for h2, subrequest, and custom sessions, or if no context was persisted.
+    pub fn take_connection_user_context(&mut self) -> Option<Box<dyn Any + Send + Sync>> {
+        if let Self::H1(s) = self {
+            s.take_connection_user_context()
+        } else {
+            None
         }
     }
 
@@ -207,22 +420,69 @@ impl Session {
     /// to read from the stream after `timeout`.
     ///
     /// This is a noop for h2.
-    pub fn set_read_timeout(&mut self, timeout: Duration) {
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         match self {
             Self::H1(s) => s.set_read_timeout(timeout),
             Self::H2(_) => {}
+            Self::Subrequest(s) => s.set_read_timeout(timeout),
+            Self::Custom(c) => c.set_read_timeout(timeout),
+        }
+    }
+
+    /// Gets the downstream read timeout if set.
+    pub fn get_read_timeout(&self) -> Option<Duration> {
+        match self {
+            Self::H1(s) => s.get_read_timeout(),
+            Self::H2(_) => None,
+            Self::Subrequest(s) => s.get_read_timeout(),
+            Self::Custom(s) => s.get_read_timeout(),
         }
     }
 
     /// Sets the downstream write timeout. This will trigger if we're unable
     /// to write to the stream after `timeout`. If a `min_send_rate` is
     /// configured then the `min_send_rate` calculated timeout has higher priority.
-    ///
-    /// This is a noop for h2.
-    pub fn set_write_timeout(&mut self, timeout: Duration) {
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) {
         match self {
             Self::H1(s) => s.set_write_timeout(timeout),
-            Self::H2(_) => {}
+            Self::H2(s) => s.set_write_timeout(timeout),
+            Self::Subrequest(s) => s.set_write_timeout(timeout),
+            Self::Custom(c) => c.set_write_timeout(timeout),
+        }
+    }
+
+    /// Gets the downstream write timeout if set.
+    pub fn get_write_timeout(&self) -> Option<Duration> {
+        match self {
+            Self::H1(s) => s.get_write_timeout(),
+            Self::H2(s) => s.get_write_timeout(),
+            Self::Subrequest(s) => s.get_write_timeout(),
+            Self::Custom(s) => s.get_write_timeout(),
+        }
+    }
+
+    /// Sets the total drain timeout, which will be applied while discarding the
+    /// request body using `drain_request_body`.
+    ///
+    /// For HTTP/1.1, reusing a session requires ensuring that the request body
+    /// is consumed. If the timeout is exceeded, the caller should give up on
+    /// trying to reuse the session.
+    pub fn set_total_drain_timeout(&mut self, timeout: Option<Duration>) {
+        match self {
+            Self::H1(s) => s.set_total_drain_timeout(timeout),
+            Self::H2(s) => s.set_total_drain_timeout(timeout),
+            Self::Subrequest(s) => s.set_total_drain_timeout(timeout),
+            Self::Custom(c) => c.set_total_drain_timeout(timeout),
+        }
+    }
+
+    /// Gets the total drain timeout if set.
+    pub fn get_total_drain_timeout(&self) -> Option<Duration> {
+        match self {
+            Self::H1(s) => s.get_total_drain_timeout(),
+            Self::H2(s) => s.get_total_drain_timeout(),
+            Self::Subrequest(s) => s.get_total_drain_timeout(),
+            Self::Custom(s) => s.get_total_drain_timeout(),
         }
     }
 
@@ -233,13 +493,15 @@ impl Session {
     /// rate must be greater than zero.
     ///
     /// Calculated write timeout is guaranteed to be at least 1s if `min_send_rate`
-    /// is greater than zero, a send rate of zero is a noop.
+    /// is greater than zero, a send rate of zero is equivalent to disabling.
     ///
     /// This is a noop for h2.
-    pub fn set_min_send_rate(&mut self, rate: usize) {
+    pub fn set_min_send_rate(&mut self, rate: Option<usize>) {
         match self {
             Self::H1(s) => s.set_min_send_rate(rate),
             Self::H2(_) => {}
+            Self::Subrequest(_) => {}
+            Self::Custom(_) => {}
         }
     }
 
@@ -249,10 +511,43 @@ impl Session {
     /// Expect: 100-continue was set on the request.
     ///
     /// This is a noop for h2 because informational responses are always ignored.
+    /// Subrequests will always proxy the info response and let the true downstream
+    /// decide to ignore or not.
     pub fn set_ignore_info_resp(&mut self, ignore: bool) {
         match self {
             Self::H1(s) => s.set_ignore_info_resp(ignore),
             Self::H2(_) => {} // always ignored
+            Self::Subrequest(_) => {}
+            Self::Custom(_) => {} // always ignored
+        }
+    }
+
+    /// Sets whether keepalive should be disabled if response is written prior to
+    /// downstream body finishing.
+    ///
+    /// This is a noop for h2.
+    pub fn set_close_on_response_before_downstream_finish(&mut self, close: bool) {
+        match self {
+            Self::H1(s) => s.set_close_on_response_before_downstream_finish(close),
+            Self::H2(_) => {}         // always ignored
+            Self::Subrequest(_) => {} // always ignored
+            Self::Custom(_) => {}     // always ignored
+        }
+    }
+
+    /// Controls behaviour when the client closes the connection after the request body.
+    ///
+    /// When **enabled** (default), a client close is returned as a `ConnectionClosed`
+    /// error so the proxy aborts immediately. When **disabled**, `read_body_or_idle`
+    /// stays pending so the proxy can finish delivering the upstream response.
+    ///
+    /// Only meaningful for H1 (TCP). Noop for H2/subrequest/custom.
+    pub fn set_abort_on_close(&mut self, abort: bool) {
+        match self {
+            Self::H1(s) => s.set_abort_on_close(abort),
+            Self::H2(_) => {}
+            Self::Subrequest(_) => {}
+            Self::Custom(_) => {}
         }
     }
 
@@ -262,6 +557,8 @@ impl Session {
         match self {
             Self::H1(s) => s.request_summary(),
             Self::H2(s) => s.request_summary(),
+            Self::Subrequest(s) => s.request_summary(),
+            Self::Custom(s) => s.request_summary(),
         }
     }
 
@@ -271,16 +568,52 @@ impl Session {
         match self {
             Self::H1(s) => s.response_written(),
             Self::H2(s) => s.response_written(),
+            Self::Subrequest(s) => s.response_written(),
+            Self::Custom(s) => s.response_written(),
+        }
+    }
+
+    /// Whether the whole response is written: a final (non-1xx) header went out, nothing
+    /// remains queued, and the body is complete by its framing.
+    ///
+    /// For H2 this is when END_STREAM was sent. A custom session reports it through
+    /// [`super::custom::server::Session::is_response_complete`].
+    pub fn is_response_complete(&self) -> bool {
+        match self {
+            Self::H1(s) => s.is_response_complete(),
+            Self::H2(s) => s.is_response_complete(),
+            Self::Subrequest(s) => s.is_response_complete(),
+            Self::Custom(s) => s.is_response_complete(),
         }
     }
 
     /// Give up the http session abruptly.
+    ///
+    /// This is a failure path: the response is abandoned mid-message, so each
+    /// protocol signals it in whatever way lets the peer tell this apart from a
+    /// response that was completed.
     /// For H1 this will close the underlying connection
     /// For H2 this will send RESET frame to end this stream without impacting the connection
+    /// For subrequests, this will drop task senders and receivers.
     pub async fn shutdown(&mut self) {
         match self {
             Self::H1(s) => s.shutdown().await,
             Self::H2(s) => s.shutdown(),
+            Self::Subrequest(s) => s.shutdown(),
+            Self::Custom(s) => s.abandon("shutdown").await,
+        }
+    }
+
+    /// Give up the H2 stream with a custom reason.
+    ///
+    /// For H2, this sends a `RST_STREAM` frame with the specified reason.
+    /// For H1, subrequests, and custom sessions, this is a no-op since they don't support
+    /// stream reset reasons.
+    ///
+    /// See [`super::v2::server::HttpSession::shutdown_with_reason`] for available reasons.
+    pub fn shutdown_with_reason(&mut self, reason: h2::Reason) {
+        if let Self::H2(s) = self {
+            s.shutdown_with_reason(reason);
         }
     }
 
@@ -288,6 +621,8 @@ impl Session {
         match self {
             Self::H1(s) => s.get_headers_raw_bytes(),
             Self::H2(s) => s.pseudo_raw_h1_request_header(),
+            Self::Subrequest(s) => s.get_headers_raw_bytes(),
+            Self::Custom(c) => c.pseudo_raw_h1_request_header(),
         }
     }
 
@@ -296,6 +631,20 @@ impl Session {
         match self {
             Self::H1(s) => s.is_body_done(),
             Self::H2(s) => s.is_body_done(),
+            Self::Subrequest(s) => s.is_body_done(),
+            Self::Custom(s) => s.is_body_done(),
+        }
+    }
+
+    /// Whether the request body has ended successfully for transports with explicit framing.
+    /// For H1 and subrequests, a read error can make `is_body_done()` true without completing
+    /// the declared body. H2 and custom sessions retain their existing completion contract.
+    pub fn is_body_complete(&mut self) -> bool {
+        match self {
+            Self::H1(s) => s.is_body_complete(),
+            Self::H2(s) => s.is_body_done(),
+            Self::Subrequest(s) => s.is_body_complete(),
+            Self::Custom(s) => s.is_body_done(),
         }
     }
 
@@ -303,10 +652,13 @@ impl Session {
     /// for H1 chunked encoding, this will end the last empty chunk
     /// for H1 content-length, this has no effect.
     /// for H2, this will send an empty DATA frame with END_STREAM flag
+    /// for subrequest, this will send a Done http task
     pub async fn finish_body(&mut self) -> Result<()> {
         match self {
             Self::H1(s) => s.finish_body().await.map(|_| ()),
             Self::H2(s) => s.finish(),
+            Self::Subrequest(s) => s.finish().await.map(|_| ()),
+            Self::Custom(s) => s.finish().await,
         }
     }
 
@@ -345,21 +697,24 @@ impl Session {
         self.set_keepalive(None);
 
         // If a response was already written and it's not informational 1xx, return.
-         // The only exception is an informational 101 Switching Protocols, which is treated
-         // as final response https://www.rfc-editor.org/rfc/rfc9110#section-15.2.2.
-         if let Some(resp_written) = self.response_written().as_ref() {
+        // The only exception is an informational 101 Switching Protocols, which is treated
+        // as final response https://www.rfc-editor.org/rfc/rfc9110#section-15.2.2.
+        if let Some(resp_written) = self.response_written().as_ref() {
             if !resp_written.status.is_informational() || resp_written.status == 101 {
                 return Ok(());
             }
         }
 
         self.write_response_header(Box::new(resp)).await?;
+
         if !body.is_empty() {
             self.write_response_body(body, true).await?;
         } else {
             self.finish_body().await?;
         }
-        
+
+        custom_session!(self.finish_custom().await?);
+
         Ok(())
     }
 
@@ -368,6 +723,8 @@ impl Session {
         match self {
             Self::H1(s) => s.is_body_empty(),
             Self::H2(s) => s.is_body_empty(),
+            Self::Subrequest(s) => s.is_body_empty(),
+            Self::Custom(s) => s.is_body_empty(),
         }
     }
 
@@ -375,6 +732,8 @@ impl Session {
         match self {
             Self::H1(s) => s.retry_buffer_truncated(),
             Self::H2(s) => s.retry_buffer_truncated(),
+            Self::Subrequest(s) => s.retry_buffer_truncated(),
+            Self::Custom(s) => s.retry_buffer_truncated(),
         }
     }
 
@@ -382,6 +741,8 @@ impl Session {
         match self {
             Self::H1(s) => s.enable_retry_buffering(),
             Self::H2(s) => s.enable_retry_buffering(),
+            Self::Subrequest(s) => s.enable_retry_buffering(),
+            Self::Custom(s) => s.enable_retry_buffering(),
         }
     }
 
@@ -389,6 +750,8 @@ impl Session {
         match self {
             Self::H1(s) => s.get_retry_buffer(),
             Self::H2(s) => s.get_retry_buffer(),
+            Self::Subrequest(s) => s.get_retry_buffer(),
+            Self::Custom(s) => s.get_retry_buffer(),
         }
     }
 
@@ -398,6 +761,21 @@ impl Session {
         match self {
             Self::H1(s) => s.read_body_or_idle(no_body_expected).await,
             Self::H2(s) => s.read_body_or_idle(no_body_expected).await,
+            Self::Subrequest(s) => s.read_body_or_idle(no_body_expected).await,
+            Self::Custom(s) => s.read_body_or_idle(no_body_expected).await,
+        }
+    }
+
+    /// Return an [`Idle`] future that waits for this H2 stream to close without
+    /// reading any body data.
+    ///
+    /// For HTTP/2 this resolves when the client resets the stream (`RST_STREAM`),
+    /// cleanly closes the stream, or the stream errors. Other protocols have no
+    /// out-of-band close signal, so this returns `None` for them.
+    pub fn watch_h2_stream_close(&mut self) -> Option<Idle<'_>> {
+        match self {
+            Self::H2(s) => Some(s.idle()),
+            _ => None,
         }
     }
 
@@ -405,6 +783,8 @@ impl Session {
         match self {
             Self::H1(s) => Some(s),
             Self::H2(_) => None,
+            Self::Subrequest(_) => None,
+            Self::Custom(_) => None,
         }
     }
 
@@ -412,6 +792,44 @@ impl Session {
         match self {
             Self::H1(_) => None,
             Self::H2(s) => Some(s),
+            Self::Subrequest(_) => None,
+            Self::Custom(_) => None,
+        }
+    }
+
+    pub fn as_subrequest(&self) -> Option<&SessionSubrequest> {
+        match self {
+            Self::H1(_) => None,
+            Self::H2(_) => None,
+            Self::Subrequest(s) => Some(s),
+            Self::Custom(_) => None,
+        }
+    }
+
+    pub fn as_subrequest_mut(&mut self) -> Option<&mut SessionSubrequest> {
+        match self {
+            Self::H1(_) => None,
+            Self::H2(_) => None,
+            Self::Subrequest(s) => Some(s),
+            Self::Custom(_) => None,
+        }
+    }
+
+    pub fn as_custom(&self) -> Option<&CS> {
+        match self {
+            Self::H1(_) => None,
+            Self::H2(_) => None,
+            Self::Subrequest(_) => None,
+            Self::Custom(c) => Some(c),
+        }
+    }
+
+    pub fn as_custom_mut(&mut self) -> Option<&mut CS> {
+        match self {
+            Self::H1(_) => None,
+            Self::H2(_) => None,
+            Self::Subrequest(_) => None,
+            Self::Custom(c) => Some(c),
         }
     }
 
@@ -419,18 +837,56 @@ impl Session {
     pub async fn write_continue_response(&mut self) -> Result<()> {
         match self {
             Self::H1(s) => s.write_continue_response().await,
-            Self::H2(s) => s.write_response_header(
-                Box::new(ResponseHeader::build(100, Some(0)).unwrap()),
-                false,
-            ),
+            Self::H2(s) => s.write_continue_response(),
+            Self::Subrequest(s) => s.write_continue_response().await,
+            // TODO(slava): is there any write_continue_response calls?
+            Self::Custom(s) => {
+                s.write_response_header(
+                    Box::new(ResponseHeader::build(100, Some(0)).unwrap()),
+                    false,
+                )
+                .await
+            }
         }
     }
 
-    /// Whether this request is for upgrade (e.g., websocket)
+    /// Whether this request is for upgrade (e.g., websocket).
     pub fn is_upgrade_req(&self) -> bool {
         match self {
             Self::H1(s) => s.is_upgrade_req(),
             Self::H2(_) => false,
+            Self::Subrequest(s) => s.is_upgrade_req(),
+            Self::Custom(s) => s.is_upgrade_req(),
+        }
+    }
+
+    /// Return whether this response completes an upgrade handshake.
+    ///
+    /// Returns `Some(true)` when an upgrade request gets an upgrade response,
+    /// `Some(false)` when an upgrade request gets a non-upgrade response, and
+    /// `None` when this request is not an upgrade.
+    pub fn is_upgrade(&self, header: &ResponseHeader) -> Option<bool> {
+        match self {
+            Self::H1(s) => s.is_upgrade(header),
+            Self::H2(_) => None,
+            Self::Subrequest(s) => s.is_upgrade(header),
+            Self::Custom(s) => {
+                if s.is_upgrade_req() {
+                    Some(super::v1::common::is_upgrade_resp(header))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Whether this session was fully upgraded (completed Upgrade handshake).
+    pub fn was_upgraded(&self) -> bool {
+        match self {
+            Self::H1(s) => s.was_upgraded(),
+            Self::H2(_) => false,
+            Self::Subrequest(s) => s.was_upgraded(),
+            Self::Custom(s) => s.was_upgraded(),
         }
     }
 
@@ -439,6 +895,8 @@ impl Session {
         match self {
             Self::H1(s) => s.body_bytes_sent(),
             Self::H2(s) => s.body_bytes_sent(),
+            Self::Subrequest(s) => s.body_bytes_sent(),
+            Self::Custom(s) => s.body_bytes_sent(),
         }
     }
 
@@ -447,6 +905,8 @@ impl Session {
         match self {
             Self::H1(s) => s.body_bytes_read(),
             Self::H2(s) => s.body_bytes_read(),
+            Self::Subrequest(s) => s.body_bytes_read(),
+            Self::Custom(s) => s.body_bytes_read(),
         }
     }
 
@@ -455,6 +915,8 @@ impl Session {
         match self {
             Self::H1(s) => Some(s.digest()),
             Self::H2(s) => s.digest(),
+            Self::Subrequest(s) => s.digest(),
+            Self::Custom(s) => s.digest(),
         }
     }
 
@@ -465,6 +927,8 @@ impl Session {
         match self {
             Self::H1(s) => Some(s.digest_mut()),
             Self::H2(s) => s.digest_mut(),
+            Self::Subrequest(s) => s.digest_mut(),
+            Self::Custom(s) => s.digest_mut(),
         }
     }
 
@@ -473,6 +937,8 @@ impl Session {
         match self {
             Self::H1(s) => s.client_addr(),
             Self::H2(s) => s.client_addr(),
+            Self::Subrequest(s) => s.client_addr(),
+            Self::Custom(s) => s.client_addr(),
         }
     }
 
@@ -481,15 +947,516 @@ impl Session {
         match self {
             Self::H1(s) => s.server_addr(),
             Self::H2(s) => s.server_addr(),
+            Self::Subrequest(s) => s.server_addr(),
+            Self::Custom(s) => s.server_addr(),
         }
     }
 
     /// Get the reference of the [Stream] that this HTTP/1 session is operating upon.
-    /// None if the HTTP session is over H2
+    /// None if the HTTP session is over H2, or a subrequest
     pub fn stream(&self) -> Option<&Stream> {
         match self {
             Self::H1(s) => Some(s.stream()),
             Self::H2(_) => None,
+            Self::Subrequest(_) => None,
+            Self::Custom(_) => None,
+        }
+    }
+
+    /// Check if this session supports the cancel-safe proxy task API.
+    ///
+    /// Currently supported by HTTP/1.x, Subrequest, and opted-in Custom
+    /// server sessions; toggled per-session via
+    /// [`set_proxy_tasks_enabled`](Self::set_proxy_tasks_enabled).
+    pub fn supports_proxy_task_api(&self) -> bool {
+        match self {
+            Self::H1(s) => s.proxy_tasks_enabled(),
+            Self::Subrequest(s) => s.proxy_tasks_enabled(),
+            Self::Custom(s) => s.proxy_tasks_enabled(),
+            Self::H2(_) => false,
+        }
+    }
+
+    /// Enable or disable the cancel-safe proxy task API for this session.
+    pub fn set_proxy_tasks_enabled(&mut self, enabled: bool) {
+        match self {
+            Self::H1(s) => s.set_proxy_tasks_enabled(enabled),
+            Self::Subrequest(s) => s.set_proxy_tasks_enabled(enabled),
+            Self::Custom(s) => s.set_proxy_tasks_enabled(enabled),
+            Self::H2(_) => {}
+        }
+    }
+
+    /// Whether HTTP/1.1 request pipelining is enabled for this session.
+    ///
+    /// Always false for H2 / Subrequest / Custom (pipelining is an H/1.1-only
+    /// concept). For H1, see
+    /// [`HttpSession::set_pipelining_enabled`](crate::protocols::http::v1::server::HttpSession::set_pipelining_enabled).
+    pub fn pipelining_enabled(&self) -> bool {
+        match self {
+            Self::H1(s) => s.pipelining_enabled(),
+            _ => false,
+        }
+    }
+
+    /// Enable or disable HTTP/1.1 request pipelining on this session.
+    ///
+    /// No-op for H2 / Subrequest / Custom. See
+    /// [`HttpSession::set_pipelining_enabled`](crate::protocols::http::v1::server::HttpSession::set_pipelining_enabled)
+    /// for semantics.
+    pub fn set_pipelining_enabled(&mut self, enabled: bool) {
+        if let Self::H1(s) = self {
+            s.set_pipelining_enabled(enabled);
+        }
+    }
+
+    /// Set pipelined bytes to be parsed as the start of this session's request.
+    ///
+    /// No-op for non-H1 sessions. See
+    /// [`HttpSession::set_pipelined_prefix`](crate::protocols::http::v1::server::HttpSession::set_pipelined_prefix)
+    /// for the lifecycle.
+    pub fn set_pipelined_prefix(&mut self, prefix: BytesMut) {
+        if let Self::H1(s) = self {
+            s.set_pipelined_prefix(prefix);
+        }
+    }
+
+    /// Queue a downstream proxy task for cancel-safe writing.
+    ///
+    /// # Panics
+    /// Panics if called on a session that doesn't support the proxy task API.
+    /// Check [`supports_proxy_task_api`](Self::supports_proxy_task_api) first,
+    /// or use `write_response_header()` / `write_response_body()` for other
+    /// session types.
+    #[track_caller]
+    pub fn send_downstream_proxy_task(&mut self, task: HttpTask) {
+        match self {
+            Self::H1(s) => s.send_proxy_task(task),
+            Self::H2(_) => panic!("H2 proxy task API not yet implemented"),
+            Self::Subrequest(s) => s.send_proxy_task(task),
+            Self::Custom(s) => s.send_proxy_task(task),
+        }
+    }
+
+    /// Check if there are pending downstream proxy tasks queued for writing.
+    ///
+    /// Returns false for sessions that don't support the proxy task API.
+    pub fn has_pending_downstream_proxy_tasks(&self) -> bool {
+        match self {
+            Self::H1(s) => s.has_pending_proxy_tasks(),
+            Self::H2(_) => false, // TODO: implement for H2
+            Self::Subrequest(s) => s.has_pending_proxy_tasks(),
+            Self::Custom(s) => s.has_pending_proxy_tasks(),
+        }
+    }
+
+    /// Write all queued downstream proxy tasks in a cancel-safe manner.
+    /// Returns `Ok(true)` if this was the end of the response stream.
+    ///
+    /// # Panics
+    /// Panics if called on a session that doesn't support the proxy task API.
+    /// Check [`supports_proxy_task_api`](Self::supports_proxy_task_api) first,
+    /// or use `write_response_header()` / `write_response_body()` for other
+    /// session types.
+    pub async fn write_downstream_proxy_tasks(&mut self) -> Result<bool> {
+        match self {
+            Self::H1(s) => s.write_proxy_tasks().await,
+            Self::H2(_) => panic!("H2 proxy task API not yet implemented"),
+            Self::Subrequest(s) => s.write_proxy_tasks().await,
+            Self::Custom(s) => s.write_proxy_tasks().await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::http::custom::CustomMessageWrite;
+    use futures::Stream;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn custom_proxy_task_defaults_are_opted_out_and_fail_loudly() {
+        let mut session = Session::new_custom(());
+
+        assert!(!session.supports_proxy_task_api());
+        session.set_proxy_tasks_enabled(true);
+        assert!(!session.supports_proxy_task_api());
+        assert!(!session.has_pending_downstream_proxy_tasks());
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            session.send_downstream_proxy_task(HttpTask::Done);
+        }))
+        .is_err());
+
+        let join = tokio::spawn(async move { session.write_downstream_proxy_tasks().await });
+        assert!(join.await.unwrap_err().is_panic());
+    }
+
+    #[tokio::test]
+    async fn custom_proxy_task_methods_delegate_to_the_custom_session() {
+        let mut session = Session::new_custom(ProxyTaskCustom::new());
+
+        assert!(!session.supports_proxy_task_api());
+        session.set_proxy_tasks_enabled(true);
+        assert!(session.supports_proxy_task_api());
+
+        session.send_downstream_proxy_task(HttpTask::Done);
+        assert!(session.has_pending_downstream_proxy_tasks());
+        assert!(session.write_downstream_proxy_tasks().await.unwrap());
+        assert!(!session.has_pending_downstream_proxy_tasks());
+    }
+
+    /// `Session::shutdown` abandons a response mid-message, so it must take the
+    /// entry point that lets a custom protocol convey exactly that. Routing it to
+    /// the bare `shutdown` instead leaves the protocol with no way to distinguish
+    /// an abandoned response from a completed one, which a peer can then read as
+    /// success.
+    #[tokio::test]
+    async fn custom_session_shutdown_signals_an_incomplete_message() {
+        let shutdown_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut session =
+            Session::new_custom(ProxyTaskCustom::with_shutdown_calls(shutdown_calls.clone()));
+
+        session.shutdown().await;
+
+        assert_eq!(*shutdown_calls.lock().unwrap(), ["abandon(shutdown)"]);
+    }
+
+    /// Reads `request` into an HTTP/1 session with proxy tasks enabled. The returned client end
+    /// holds only 64 bytes and is not read, so a larger response header write stays pending.
+    async fn h1_session_with_backpressured_client(
+        request: &str,
+    ) -> (Session, tokio::io::DuplexStream) {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, server) = tokio::io::duplex(64);
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut session = Session::new_http1(Box::new(server));
+        assert!(session.read_request().await.unwrap());
+        session.set_proxy_tasks_enabled(true);
+        (session, client)
+    }
+
+    fn response_with_large_header(status: u16, content_length: usize) -> Box<ResponseHeader> {
+        let mut response = ResponseHeader::build(status, None).unwrap();
+        response
+            .insert_header("content-length", content_length)
+            .unwrap();
+        response
+            .insert_header("x-padding", "p".repeat(1024))
+            .unwrap();
+        Box::new(response)
+    }
+
+    /// Queues `tasks`, cancels their write while the header is still pending, then lets the
+    /// client read and finishes the write, returning `is_response_complete` at both points.
+    async fn response_complete_around_pending_header_write(
+        request: &str,
+        tasks: Vec<HttpTask>,
+    ) -> (bool, bool) {
+        use futures::FutureExt;
+        use tokio::io::AsyncReadExt;
+
+        let (mut session, mut client) = h1_session_with_backpressured_client(request).await;
+        for task in tasks {
+            session.send_downstream_proxy_task(task);
+        }
+        assert!(session
+            .write_downstream_proxy_tasks()
+            .now_or_never()
+            .is_none());
+        assert!(session.has_pending_downstream_proxy_tasks());
+        let while_pending = session.as_http1().unwrap().is_response_complete();
+
+        let client_reads = tokio::spawn(async move {
+            let mut sink = [0u8; 256];
+            while client.read(&mut sink).await.unwrap() > 0 {}
+        });
+        assert!(session.write_downstream_proxy_tasks().await.unwrap());
+        let after_write = session.as_http1().unwrap().is_response_complete();
+        drop(session);
+        client_reads.await.unwrap();
+        (while_pending, after_write)
+    }
+
+    async fn assert_header_only_response_completes_when_written(
+        request: &str,
+        response: Box<ResponseHeader>,
+    ) {
+        let (while_pending, after_write) = response_complete_around_pending_header_write(
+            request,
+            vec![HttpTask::Header(response, true)],
+        )
+        .await;
+        assert!(
+            !while_pending,
+            "response complete before the header was written"
+        );
+        assert!(after_write, "response not complete after it was written");
+    }
+
+    #[tokio::test]
+    async fn response_is_complete_only_after_a_pending_head_response() {
+        assert_header_only_response_completes_when_written(
+            "HEAD / HTTP/1.1\r\nHost: a\r\n\r\n",
+            response_with_large_header(200, 5),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn response_is_complete_only_after_a_pending_304_response() {
+        assert_header_only_response_completes_when_written(
+            "GET / HTTP/1.1\r\nHost: a\r\n\r\n",
+            response_with_large_header(304, 5),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn response_is_complete_only_after_a_pending_empty_response() {
+        assert_header_only_response_completes_when_written(
+            "GET / HTTP/1.1\r\nHost: a\r\n\r\n",
+            response_with_large_header(200, 0),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn response_is_complete_only_after_a_pending_response_with_a_body() {
+        let (while_pending, after_write) = response_complete_around_pending_header_write(
+            "GET / HTTP/1.1\r\nHost: a\r\n\r\n",
+            vec![
+                HttpTask::Header(response_with_large_header(200, 5), false),
+                HttpTask::Body(Some(Bytes::from_static(b"hello")), true),
+            ],
+        )
+        .await;
+        assert!(!while_pending);
+        assert!(after_write);
+    }
+
+    struct ProxyTaskCustom {
+        header: RequestHeader,
+        enabled: bool,
+        tasks: Vec<HttpTask>,
+        shutdown_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ProxyTaskCustom {
+        fn new() -> Self {
+            Self {
+                header: RequestHeader::build("GET", b"/", None).unwrap(),
+                enabled: false,
+                tasks: Vec::new(),
+                shutdown_calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_shutdown_calls(shutdown_calls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                shutdown_calls,
+                ..Self::new()
+            }
+        }
+    }
+
+    impl SessionCustom for ProxyTaskCustom {
+        fn req_header(&self) -> &RequestHeader {
+            &self.header
+        }
+
+        fn req_header_mut(&mut self) -> &mut RequestHeader {
+            &mut self.header
+        }
+
+        async fn read_body_bytes(&mut self) -> Result<Option<Bytes>> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn drain_request_body(&mut self) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn write_response_header(
+            &mut self,
+            _resp: Box<ResponseHeader>,
+            _end: bool,
+        ) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn write_response_header_ref(
+            &mut self,
+            _resp: &ResponseHeader,
+            _end: bool,
+        ) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn write_body(&mut self, _data: Bytes, _end: bool) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn write_trailers(&mut self, _trailers: HeaderMap) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn response_duplex_vec(&mut self, _tasks: Vec<HttpTask>) -> Result<bool> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn proxy_tasks_enabled(&self) -> bool {
+            self.enabled
+        }
+
+        fn set_proxy_tasks_enabled(&mut self, enabled: bool) {
+            self.enabled = enabled;
+        }
+
+        fn send_proxy_task(&mut self, task: HttpTask) {
+            self.tasks.push(task);
+        }
+
+        fn has_pending_proxy_tasks(&self) -> bool {
+            !self.tasks.is_empty()
+        }
+
+        async fn write_proxy_tasks(&mut self) -> Result<bool> {
+            self.tasks.clear();
+            Ok(true)
+        }
+
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn get_read_timeout(&self) -> Option<Duration> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn set_write_timeout(&mut self, _timeout: Option<Duration>) {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn get_write_timeout(&self) -> Option<Duration> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn set_total_drain_timeout(&mut self, _timeout: Option<Duration>) {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn get_total_drain_timeout(&self) -> Option<Duration> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn request_summary(&self) -> String {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn response_written(&self) -> Option<&ResponseHeader> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn shutdown(&mut self, code: u32, ctx: &str) {
+            self.shutdown_calls
+                .lock()
+                .unwrap()
+                .push(format!("shutdown({code}, {ctx})"));
+        }
+
+        async fn abandon(&mut self, ctx: &str) {
+            self.shutdown_calls
+                .lock()
+                .unwrap()
+                .push(format!("abandon({ctx})"));
+        }
+
+        fn is_body_done(&mut self) -> bool {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn finish(&mut self) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn is_body_empty(&mut self) -> bool {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn read_body_or_idle(&mut self, _no_body_expected: bool) -> Result<Option<Bytes>> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn body_bytes_sent(&self) -> usize {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn body_bytes_read(&self) -> usize {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn digest(&self) -> Option<&Digest> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn digest_mut(&mut self) -> Option<&mut Digest> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn client_addr(&self) -> Option<&SocketAddr> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn server_addr(&self) -> Option<&SocketAddr> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn pseudo_raw_h1_request_header(&self) -> Bytes {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn enable_retry_buffering(&mut self) {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn retry_buffer_truncated(&self) -> bool {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn get_retry_buffer(&self) -> Option<Bytes> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        async fn finish_custom(&mut self) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn take_custom_message_reader(
+            &mut self,
+        ) -> Option<Box<dyn Stream<Item = Result<Bytes>> + Unpin + Send + Sync + 'static>> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn restore_custom_message_reader(
+            &mut self,
+            _reader: Box<dyn Stream<Item = Result<Bytes>> + Unpin + Send + Sync + 'static>,
+        ) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn take_custom_message_writer(&mut self) -> Option<Box<dyn CustomMessageWrite>> {
+            unreachable!("not used by proxy task dispatch test")
+        }
+
+        fn restore_custom_message_writer(
+            &mut self,
+            _writer: Box<dyn CustomMessageWrite>,
+        ) -> Result<()> {
+            unreachable!("not used by proxy task dispatch test")
         }
     }
 }

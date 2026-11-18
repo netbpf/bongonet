@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,10 +17,11 @@ use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::listeners::tls::Acceptor;
 use crate::protocols::raw_connect::ProxyDigest;
+use crate::protocols::tls::TlsRef;
 use crate::protocols::{tls::SslDigest, Peek, TimingDigest, UniqueIDType};
 use crate::protocols::{
     GetProxyDigest, GetSocketDigest, GetTimingDigest, SocketDigest, Ssl, UniqueID, ALPN,
@@ -46,6 +47,7 @@ pub struct InnerStream<T> {
 pub struct TlsStream<T> {
     tls: InnerStream<T>,
     digest: Option<Arc<SslDigest>>,
+    ssl: Option<TlsRef>,
     timing: TimingDigest,
 }
 
@@ -69,6 +71,7 @@ where
         Ok(TlsStream {
             tls,
             digest: None,
+            ssl: None,
             timing: Default::default(),
         })
     }
@@ -85,6 +88,7 @@ where
         Ok(TlsStream {
             tls,
             digest: None,
+            ssl: None,
             timing: Default::default(),
         })
     }
@@ -133,6 +137,12 @@ impl<T> TlsStream<T> {
     pub fn ssl_digest(&self) -> Option<Arc<SslDigest>> {
         self.digest.clone()
     }
+
+    /// Attempts to obtain a mutable reference to the SslDigest.
+    /// This method returns `None` if the SslDigest is currently held by other references.
+    pub(crate) fn ssl_digest_mut(&mut self) -> Option<&mut SslDigest> {
+        Arc::get_mut(self.digest.as_mut()?)
+    }
 }
 
 impl<T> Deref for TlsStream<T> {
@@ -155,17 +165,23 @@ where
 {
     /// Connect to the remote TLS server as a client
     pub(crate) async fn connect(&mut self) -> Result<()> {
+        let handshake_start = Instant::now();
         self.tls.connect().await?;
+        self.timing.establishment_duration = Some(handshake_start.elapsed());
         self.timing.established_ts = SystemTime::now();
         self.digest = self.tls.digest();
+        self.ssl = self.tls.tls_ref();
         Ok(())
     }
 
     /// Finish the TLS handshake from client as a server
     pub(crate) async fn accept(&mut self) -> Result<()> {
+        let handshake_start = Instant::now();
         self.tls.accept().await?;
+        self.timing.establishment_duration = Some(handshake_start.elapsed());
         self.timing.established_ts = SystemTime::now();
         self.digest = self.tls.digest();
+        self.ssl = self.tls.tls_ref();
         Ok(())
     }
 }
@@ -222,6 +238,10 @@ where
 }
 
 impl<T> Ssl for TlsStream<T> {
+    fn get_ssl(&self) -> Option<&TlsRef> {
+        self.ssl.as_ref()
+    }
+
     fn get_ssl_digest(&self) -> Option<Arc<SslDigest>> {
         self.ssl_digest()
     }
@@ -304,6 +324,26 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> InnerStream<T> {
     pub(crate) fn digest(&mut self) -> Option<Arc<SslDigest>> {
         Some(Arc::new(SslDigest::from_stream(&self.stream)))
     }
+
+    pub(crate) fn tls_ref(&self) -> Option<TlsRef> {
+        let stream = self.stream.as_ref()?;
+        let (_io, session) = stream.get_ref();
+        let peer_certs = session.peer_certificates().map(|certs| certs.to_vec());
+        let cipher = session
+            .negotiated_cipher_suite()
+            .and_then(|suite| suite.suite().as_str());
+        let version = session.protocol_version().and_then(|v| v.as_str());
+        let server_name = match stream {
+            RusTlsStream::Server(s) => s.get_ref().1.server_name().map(|n| n.to_string()),
+            RusTlsStream::Client(_) => None,
+        };
+        Some(TlsRef {
+            peer_certs,
+            cipher,
+            version,
+            server_name,
+        })
+    }
 }
 
 impl<S> GetSocketDigest for InnerStream<S>
@@ -384,13 +424,7 @@ impl SslDigest {
             .map(|(organization, serial)| (organization, Some(serial)))
             .unwrap_or_default();
 
-        SslDigest {
-            cipher,
-            version,
-            organization,
-            serial_number,
-            cert_digest,
-        }
+        SslDigest::new(cipher, version, organization, serial_number, cert_digest)
     }
 }
 

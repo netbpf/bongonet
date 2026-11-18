@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,21 +17,23 @@ use bongonet_http::{RequestHeader, ResponseHeader};
 use bytes::Bytes;
 use std::time::Duration;
 
-use super::v1::client::HttpSession as Http1Session;
 use super::v2::client::Http2Session;
+use super::{custom::client::Session, v1::client::HttpSession as Http1Session};
 use crate::protocols::{Digest, SocketAddr, Stream};
 
 /// A type for Http client session. It can be either an Http1 connection or an Http2 stream.
-pub enum HttpSession {
+pub enum HttpSession<S = ()> {
     H1(Http1Session),
     H2(Http2Session),
+    Custom(S),
 }
 
-impl HttpSession {
+impl<S: Session> HttpSession<S> {
     pub fn as_http1(&self) -> Option<&Http1Session> {
         match self {
             Self::H1(s) => Some(s),
             Self::H2(_) => None,
+            Self::Custom(_) => None,
         }
     }
 
@@ -39,8 +41,26 @@ impl HttpSession {
         match self {
             Self::H1(_) => None,
             Self::H2(s) => Some(s),
+            Self::Custom(_) => None,
         }
     }
+
+    pub fn as_custom(&self) -> Option<&S> {
+        match self {
+            Self::H1(_) => None,
+            Self::H2(_) => None,
+            Self::Custom(c) => Some(c),
+        }
+    }
+
+    pub fn as_custom_mut(&mut self) -> Option<&mut S> {
+        match self {
+            Self::H1(_) => None,
+            Self::H2(_) => None,
+            Self::Custom(c) => Some(c),
+        }
+    }
+
     /// Write the request header to the server
     /// After the request header is sent. The caller can either start reading the response or
     /// sending request body if any.
@@ -51,6 +71,7 @@ impl HttpSession {
                 Ok(())
             }
             HttpSession::H2(h2) => h2.write_request_header(req, false),
+            HttpSession::Custom(c) => c.write_request_header(req, false).await,
         }
     }
 
@@ -63,6 +84,7 @@ impl HttpSession {
                 Ok(())
             }
             HttpSession::H2(h2) => h2.write_request_body(data, end).await,
+            HttpSession::Custom(c) => c.write_request_body(data, end).await,
         }
     }
 
@@ -74,28 +96,47 @@ impl HttpSession {
                 Ok(())
             }
             HttpSession::H2(h2) => h2.finish_request_body(),
+            HttpSession::Custom(c) => c.finish_request_body().await,
         }
     }
 
     /// Set the read timeout for reading header and body.
     ///
     /// The timeout is per read operation, not on the overall time reading the entire response
-    pub fn set_read_timeout(&mut self, timeout: Duration) {
+    pub fn set_read_timeout(&mut self, timeout: Option<Duration>) {
         match self {
-            HttpSession::H1(h1) => h1.read_timeout = Some(timeout),
-            HttpSession::H2(h2) => h2.read_timeout = Some(timeout),
+            HttpSession::H1(h1) => h1.read_timeout = timeout,
+            HttpSession::H2(h2) => h2.read_timeout = timeout,
+            HttpSession::Custom(c) => c.set_read_timeout(timeout),
         }
     }
 
     /// Set the write timeout for writing header and body.
     ///
     /// The timeout is per write operation, not on the overall time writing the entire request.
-    ///
-    /// This is a noop for h2.
-    pub fn set_write_timeout(&mut self, timeout: Duration) {
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) {
         match self {
-            HttpSession::H1(h1) => h1.write_timeout = Some(timeout),
-            HttpSession::H2(_) => { /* no write timeout because the actual write happens async*/ }
+            HttpSession::H1(h1) => h1.write_timeout = timeout,
+            HttpSession::H2(h2) => h2.write_timeout = timeout,
+            HttpSession::Custom(c) => c.set_write_timeout(timeout),
+        }
+    }
+
+    /// Set the maximum number of fields accepted in an HTTP/1 response head.
+    ///
+    /// This is a no-op for non-HTTP/1 sessions.
+    pub fn set_h1_header_count_limit(&mut self, limit: super::v1::HeaderLimit) {
+        if let Self::H1(session) = self {
+            session.set_header_count_limit(limit);
+        }
+    }
+
+    /// Set the HTTP/1 response parser configuration.
+    ///
+    /// This is a no-op for non-HTTP/1 sessions.
+    pub fn set_h1_response_parser_config(&mut self, config: super::v1::ResponseParserConfig) {
+        if let Self::H1(session) = self {
+            session.set_response_parser_config(config);
         }
     }
 
@@ -109,6 +150,7 @@ impl HttpSession {
                 Ok(())
             }
             HttpSession::H2(h2) => h2.read_response_header().await,
+            HttpSession::Custom(c) => c.read_response_header().await,
         }
     }
 
@@ -119,6 +161,7 @@ impl HttpSession {
         match self {
             HttpSession::H1(h1) => h1.read_body_bytes().await,
             HttpSession::H2(h2) => h2.read_response_body().await,
+            HttpSession::Custom(c) => c.read_response_body().await,
         }
     }
 
@@ -127,16 +170,22 @@ impl HttpSession {
         match self {
             HttpSession::H1(h1) => h1.is_body_done(),
             HttpSession::H2(h2) => h2.response_finished(),
+            HttpSession::Custom(c) => c.response_finished(),
         }
     }
 
     /// Give up the http session abruptly.
+    ///
+    /// This is a failure path: the request is abandoned mid-message, so each
+    /// protocol signals it in whatever way lets the peer tell this apart from a
+    /// request that was completed.
     /// For H1 this will close the underlying connection
     /// For H2 this will send RST_STREAM frame to end this stream if the stream has not ended at all
     pub async fn shutdown(&mut self) {
         match self {
             Self::H1(s) => s.shutdown().await,
             Self::H2(s) => s.shutdown(),
+            Self::Custom(c) => c.abandon("shutdown").await,
         }
     }
 
@@ -147,6 +196,7 @@ impl HttpSession {
         match self {
             Self::H1(s) => s.resp_header(),
             Self::H2(s) => s.response_header(),
+            Self::Custom(c) => c.response_header(),
         }
     }
 
@@ -158,6 +208,7 @@ impl HttpSession {
         match self {
             Self::H1(s) => Some(s.digest()),
             Self::H2(s) => s.digest(),
+            Self::Custom(c) => c.digest(),
         }
     }
 
@@ -168,6 +219,7 @@ impl HttpSession {
         match self {
             Self::H1(s) => Some(s.digest_mut()),
             Self::H2(s) => s.digest_mut(),
+            Self::Custom(s) => s.digest_mut(),
         }
     }
 
@@ -176,6 +228,7 @@ impl HttpSession {
         match self {
             Self::H1(s) => s.server_addr(),
             Self::H2(s) => s.server_addr(),
+            Self::Custom(s) => s.server_addr(),
         }
     }
 
@@ -184,6 +237,7 @@ impl HttpSession {
         match self {
             Self::H1(s) => s.client_addr(),
             Self::H2(s) => s.client_addr(),
+            Self::Custom(s) => s.client_addr(),
         }
     }
 
@@ -193,6 +247,159 @@ impl HttpSession {
         match self {
             Self::H1(s) => Some(s.stream()),
             Self::H2(_) => None,
+            Self::Custom(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HttpSession, Session};
+    use crate::protocols::http::custom::{BodyWrite, CustomMessageWrite};
+    use crate::protocols::{Digest, SocketAddr, UniqueIDType};
+    use async_trait::async_trait;
+    use bongonet_error::Result;
+    use bongonet_http::{RequestHeader, ResponseHeader};
+    use bytes::Bytes;
+    use futures::Stream;
+    use http::HeaderMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// Records which shutdown entry point the session dispatcher reached. Every
+    /// other method is `unreachable!()`: this exists to pin the dispatch, not to
+    /// model a protocol.
+    struct ShutdownRecordingCustom {
+        shutdown_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Session for ShutdownRecordingCustom {
+        async fn shutdown(&mut self, code: u32, ctx: &str) {
+            self.shutdown_calls
+                .lock()
+                .unwrap()
+                .push(format!("shutdown({code}, {ctx})"));
+        }
+
+        async fn abandon(&mut self, ctx: &str) {
+            self.shutdown_calls
+                .lock()
+                .unwrap()
+                .push(format!("abandon({ctx})"));
+        }
+
+        async fn write_request_header(
+            &mut self,
+            _req: Box<RequestHeader>,
+            _end: bool,
+        ) -> Result<()> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn write_request_body(&mut self, _data: Bytes, _end: bool) -> Result<()> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn finish_request_body(&mut self) -> Result<()> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn set_read_timeout(&mut self, _timeout: Option<Duration>) {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn set_write_timeout(&mut self, _timeout: Option<Duration>) {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn read_response_header(&mut self) -> Result<()> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn read_response_body(&mut self) -> Result<Option<Bytes>> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn response_finished(&self) -> bool {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn response_header(&self) -> Option<&ResponseHeader> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn was_upgraded(&self) -> bool {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn digest(&self) -> Option<&Digest> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn digest_mut(&mut self) -> Option<&mut Digest> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn server_addr(&self) -> Option<&SocketAddr> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn client_addr(&self) -> Option<&SocketAddr> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn read_trailers(&mut self) -> Result<Option<HeaderMap>> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn fd(&self) -> UniqueIDType {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn check_response_end_or_error(&mut self, _headers: bool) -> Result<bool> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn take_request_body_writer(&mut self) -> Option<Box<dyn BodyWrite>> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn finish_custom(&mut self) -> Result<()> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn take_custom_message_reader(
+            &mut self,
+        ) -> Option<Box<dyn Stream<Item = Result<Bytes>> + Unpin + Send + Sync + 'static>> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        async fn drain_custom_messages(&mut self) -> Result<()> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+
+        fn take_custom_message_writer(&mut self) -> Option<Box<dyn CustomMessageWrite>> {
+            unreachable!("not used by the shutdown dispatch test")
+        }
+    }
+
+    /// `HttpSession::shutdown` abandons a request mid-message, so it must take the
+    /// entry point that lets a custom protocol convey exactly that. Mirrors the
+    /// server-side `custom_session_shutdown_signals_an_incomplete_message`.
+    ///
+    /// This method has no callers in-tree today, so the test guards the routing
+    /// rather than a live path — which is precisely when a silent regression back
+    /// to the benign `shutdown(0, ..)` would go unnoticed.
+    #[tokio::test]
+    async fn custom_session_shutdown_signals_an_incomplete_message() {
+        let shutdown_calls = Arc::new(Mutex::new(Vec::new()));
+        let mut session = HttpSession::Custom(ShutdownRecordingCustom {
+            shutdown_calls: shutdown_calls.clone(),
+        });
+
+        session.shutdown().await;
+
+        assert_eq!(*shutdown_calls.lock().unwrap(), ["abandon(shutdown)"]);
     }
 }

@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -71,6 +71,15 @@ impl HttpModule for ResponseCompression {
             *body = compressed;
         }
         Ok(())
+    }
+
+    fn response_done_filter(&mut self) -> Result<Option<Bytes>> {
+        if !self.0.is_enabled() {
+            return Ok(None);
+        }
+        // Flush or finish any remaining encoded bytes upon HTTP response completion
+        // (if it was not already ended in the body filter).
+        Ok(self.0.response_body_filter(None, true))
     }
 }
 

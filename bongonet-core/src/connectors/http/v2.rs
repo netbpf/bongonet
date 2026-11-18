@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,19 +13,22 @@
 // limitations under the License.
 
 use super::HttpSession;
-use crate::connectors::{ConnectorOptions, TransportConnector};
+use crate::connectors::{ConnectorOptions, IdleConnection, PoolCallback, TransportConnector};
+use crate::protocols::http::custom::client::Session;
 use crate::protocols::http::v1::client::HttpSession as Http1Session;
+use crate::protocols::http::v1::ResponseParserConfig;
 use crate::protocols::http::v2::client::{drive_connection, Http2Session};
 use crate::protocols::{Digest, Stream, UniqueIDType};
 use crate::upstreams::peer::{Peer, ALPN};
 
-use bongonet_error::{Error, ErrorType::*, OrErr, Result};
+use bongonet_error::{Error, ErrorType::*, OkOrErr, OrErr, Result};
 use bongonet_pool::{ConnectionMeta, ConnectionPool, PoolNode};
 use bytes::Bytes;
 use h2::client::SendRequest;
 use log::debug;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,7 +65,7 @@ pub(crate) struct ConnectionRefInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct ConnectionRef(Arc<ConnectionRefInner>);
+pub struct ConnectionRef(Arc<ConnectionRefInner>);
 
 impl ConnectionRef {
     pub fn new(
@@ -85,12 +88,37 @@ impl ConnectionRef {
             release_lock: Arc::new(Mutex::new(())),
         }))
     }
-
+    // TODO: Migrate callers of `more_streams_allowed()` to
+    // `can_accept_streams(1)`, then deprecate/remove the duplicate legacy method.
+    // The unified predicate should reject closed and shutting-down connections;
+    // it remains advisory and does not reserve stream capacity.
     pub fn more_streams_allowed(&self) -> bool {
         let current = self.0.current_streams.load(Ordering::Relaxed);
         !self.is_shutting_down()
             && self.0.max_streams > current
             && self.0.connection_stub.0.current_max_send_streams() > current
+    }
+
+    /// Return the number of additional streams this connection can currently accept.
+    ///
+    /// This is an advisory snapshot and does not reserve capacity. Concurrent stream creation,
+    /// connection closure, or a peer settings update can invalidate it immediately.
+    pub fn free_stream_slots(&self) -> usize {
+        if self.is_closed() || self.is_shutting_down() {
+            return 0;
+        }
+
+        let current = self.0.current_streams.load(Ordering::Relaxed);
+        let limit = self
+            .0
+            .max_streams
+            .min(self.0.connection_stub.0.current_max_send_streams());
+        limit.saturating_sub(current)
+    }
+
+    /// Return whether this connection can currently accept `streams` additional streams.
+    pub fn can_accept_streams(&self, streams: usize) -> bool {
+        streams > 0 && self.free_stream_slots() >= streams
     }
 
     pub fn is_idle(&self) -> bool {
@@ -127,6 +155,14 @@ impl ConnectionRef {
         self.0.shutting_down.load(Ordering::Relaxed)
     }
 
+    /// Mark this connection for shutdown.
+    ///
+    /// No new streams will be created on this connection and
+    /// it will be discarded once all active streams are released.
+    pub fn mark_shutdown(&self) {
+        self.0.shutting_down.store(true, Ordering::Relaxed);
+    }
+
     // spawn a stream if more stream is allowed, otherwise return Ok(None)
     pub async fn spawn_stream(&self) -> Result<Option<Http2Session>> {
         // Atomically check if the current_stream is over the limit
@@ -143,16 +179,24 @@ impl ConnectionRef {
             Err(e) => {
                 // fail to create the stream, reset the counter
                 self.0.current_streams.fetch_sub(1, Ordering::SeqCst);
-                // Remote sends GOAWAY(NO_ERROR): graceful shutdown: this connection no longer
-                // accepts new streams. We can still try to create new connection.
-                if e.root_cause()
+
+                // Check for graceful shutdown conditions where we can retry with a new connection
+                let is_graceful_shutdown = e
+                    .root_cause()
                     .downcast_ref::<h2::Error>()
                     .map(|e| {
-                        e.is_go_away() && e.is_remote() && e.reason() == Some(h2::Reason::NO_ERROR)
+                        // Remote sends GOAWAY(NO_ERROR): graceful shutdown
+                        (e.is_go_away() && e.is_remote() && e.reason() == Some(h2::Reason::NO_ERROR))
+                        // Or broken pipe wrapped inside an h2::Error: stream closed unexpectedly
+                        || (e.is_io()
+                            && e.get_io()
+                                .map(|io| io.kind() == ErrorKind::BrokenPipe)
+                                .unwrap_or(false))
                     })
-                    .unwrap_or(false)
-                {
-                    self.0.shutting_down.store(true, Ordering::Relaxed);
+                    .unwrap_or(false);
+
+                if is_graceful_shutdown {
+                    self.mark_shutdown();
                     Ok(None)
                 } else {
                     Err(e)
@@ -162,7 +206,7 @@ impl ConnectionRef {
     }
 }
 
-struct InUsePool {
+pub struct InUsePool {
     // TODO: use bongonet hashmap to shard the lock contention
     pools: RwLock<HashMap<u64, PoolNode<ConnectionRef>>>,
 }
@@ -174,7 +218,22 @@ impl InUsePool {
         }
     }
 
-    fn insert(&self, reuse_hash: u64, conn: ConnectionRef) {
+    /// Attempt to remove an empty [`PoolNode`] entry from the pools `HashMap`.
+    ///
+    /// Same rationale as [`ConnectionPool::try_remove_empty_node`]: prevents
+    /// unbounded growth when many unique reuse hashes are seen over time.
+    /// The write lock + re-check ensures we never remove a node that was
+    /// concurrently repopulated.
+    fn try_remove_empty_node(&self, reuse_hash: u64) {
+        let mut pools = self.pools.write();
+        if let Some(pool) = pools.get(&reuse_hash) {
+            if pool.is_empty() {
+                pools.remove(&reuse_hash);
+            }
+        }
+    }
+
+    pub fn insert(&self, reuse_hash: u64, conn: ConnectionRef) {
         {
             let pools = self.pools.read();
             if let Some(pool) = pools.get(&reuse_hash) {
@@ -183,29 +242,58 @@ impl InUsePool {
             }
         } // drop read lock
 
+        let mut pools = self.pools.write();
+        // Double-check: another thread may have inserted a node between
+        // dropping the read lock and acquiring this write lock.
+        if let Some(pool) = pools.get(&reuse_hash) {
+            pool.insert(conn.id(), conn);
+            return;
+        }
         let pool = PoolNode::new();
         pool.insert(conn.id(), conn);
-        let mut pools = self.pools.write();
         pools.insert(reuse_hash, pool);
     }
 
     // retrieve a h2 conn ref to create a new stream
     // the caller should return the conn ref to this pool if there are still
     // capacity left for more streams
-    fn get(&self, reuse_hash: u64) -> Option<ConnectionRef> {
-        let pools = self.pools.read();
-        pools.get(&reuse_hash)?.get_any().map(|v| v.1)
+    pub fn get(&self, reuse_hash: u64) -> Option<ConnectionRef> {
+        let (result, maybe_empty) = {
+            let pools = self.pools.read();
+            match pools.get(&reuse_hash) {
+                Some(pool) => match pool.get_any() {
+                    Some((_, conn)) => (Some(conn), pool.is_empty()),
+                    None => (None, true),
+                },
+                None => (None, false),
+            }
+        }; // read lock released here
+
+        if maybe_empty {
+            self.try_remove_empty_node(reuse_hash);
+        }
+
+        result
     }
 
     // release a h2_stream, this functional will cause an ConnectionRef to be returned (if exist)
     // the caller should update the ref and then decide where to put it (in use pool or idle)
-    fn release(&self, reuse_hash: u64, id: UniqueIDType) -> Option<ConnectionRef> {
-        let pools = self.pools.read();
-        if let Some(pool) = pools.get(&reuse_hash) {
-            pool.remove(id)
-        } else {
-            None
+    pub fn release(&self, reuse_hash: u64, id: UniqueIDType) -> Option<ConnectionRef> {
+        let (result, maybe_empty) = {
+            let pools = self.pools.read();
+            if let Some(pool) = pools.get(&reuse_hash) {
+                let removed = pool.remove(id);
+                (removed, pool.is_empty())
+            } else {
+                (None, false)
+            }
+        }; // read lock released here
+
+        if maybe_empty {
+            self.try_remove_empty_node(reuse_hash);
         }
+
+        result
     }
 }
 
@@ -219,6 +307,8 @@ pub struct Connector {
     idle_pool: Arc<ConnectionPool<ConnectionRef>>,
     // the pool of h2 connections that have ongoing streams
     in_use_pool: InUsePool,
+    pool_callback: Option<PoolCallback>,
+    h1_response_parser_config: ResponseParserConfig,
 }
 
 impl Connector {
@@ -227,21 +317,43 @@ impl Connector {
         let pool_size = options
             .as_ref()
             .map_or(DEFAULT_POOL_SIZE, |o| o.keepalive_pool_size);
+        let pool_callback = options
+            .as_ref()
+            .and_then(|o| o.keepalive_pool_callback.clone());
+        let h1_response_parser_config = options
+            .as_ref()
+            .map_or_else(ResponseParserConfig::default, |options| {
+                options.h1_response_parser_config
+            });
         // connection offload is handled by the [TransportConnector]
         Connector {
             transport: TransportConnector::new(options),
             idle_pool: Arc::new(ConnectionPool::new(pool_size)),
             in_use_pool: InUsePool::new(),
+            pool_callback,
+            h1_response_parser_config,
         }
+    }
+
+    pub fn transport(&self) -> &TransportConnector {
+        &self.transport
+    }
+
+    pub fn idle_pool(&self) -> &Arc<ConnectionPool<ConnectionRef>> {
+        &self.idle_pool
+    }
+
+    pub fn in_use_pool(&self) -> &InUsePool {
+        &self.in_use_pool
     }
 
     /// Create a new Http2 connection to the given server
     ///
     /// Either an Http2 or Http1 session can be returned depending on the server's preference.
-    pub async fn new_http_session<P: Peer + Send + Sync + 'static>(
+    pub async fn new_http_session<P: Peer + Send + Sync + 'static, C: Session>(
         &self,
         peer: &P,
-    ) -> Result<HttpSession> {
+    ) -> Result<HttpSession<C>> {
         let stream = self.transport.new_stream(peer).await?;
 
         // check alpn
@@ -249,7 +361,9 @@ impl Connector {
             Some(ALPN::H2) => { /* continue */ }
             Some(_) => {
                 // H2 not supported
-                return Ok(HttpSession::H1(Http1Session::new(stream)));
+                let mut session = Http1Session::new_with_options(stream, peer);
+                session.set_response_parser_config(self.h1_response_parser_config);
+                return Ok(HttpSession::H1(session));
             }
             None => {
                 // if tls but no ALPN, default to h1
@@ -257,20 +371,27 @@ impl Connector {
                 if peer.tls()
                     || peer
                         .get_peer_options()
-                        .map_or(true, |o| o.alpn.get_min_http_version() == 1)
+                        .is_none_or(|o| o.alpn.get_min_http_version() == 1)
                 {
-                    return Ok(HttpSession::H1(Http1Session::new(stream)));
+                    let mut session = Http1Session::new_with_options(stream, peer);
+                    session.set_response_parser_config(self.h1_response_parser_config);
+                    return Ok(HttpSession::H1(session));
                 }
                 // else: min http version=H2 over plaintext, there is no ALPN anyways, we trust
                 // the caller that the server speaks h2c
             }
         }
-        let max_h2_stream = peer.get_peer_options().map_or(1, |o| o.max_h2_streams);
-        let conn = handshake(stream, max_h2_stream, peer.h2_ping_interval()).await?;
-        let h2_stream = conn
-            .spawn_stream()
-            .await?
-            .expect("newly created connections should have at least one free stream");
+        let peer_options = peer.get_peer_options();
+        let mut settings = H2HandshakeSettings::new();
+        settings.max_streams = peer_options.map_or(1, |o| o.max_h2_streams);
+        settings.ping_interval = peer.h2_ping_interval();
+        settings.stream_window_size = peer_options.and_then(|o| o.h2_stream_window_size);
+        settings.connection_window_size = peer_options.and_then(|o| o.h2_connection_window_size);
+        let conn = handshake(stream, settings).await?;
+        let h2_stream = conn.spawn_stream().await?.or_err(
+            H2Error,
+            "newly created connection has no free streams (server may have sent GOAWAY)",
+        )?;
         if conn.more_streams_allowed() {
             self.in_use_pool.insert(peer.reuse_hash(), conn);
         }
@@ -302,8 +423,28 @@ impl Connector {
         let maybe_conn = self
             .in_use_pool
             .get(reuse_hash)
+            // filter out closed, InUsePool does not have notify closed eviction like the idle pool
+            // and it's possible we get an in use connection that is closed and not yet released
+            .filter(|c| !c.is_closed())
             .or_else(|| self.idle_pool.get(&reuse_hash));
         if let Some(conn) = maybe_conn {
+            #[cfg(unix)]
+            if !peer.matches_fd(conn.id()) {
+                return Ok(None);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::{AsRawSocket, RawSocket};
+                struct WrappedRawSocket(RawSocket);
+                impl AsRawSocket for WrappedRawSocket {
+                    fn as_raw_socket(&self) -> RawSocket {
+                        self.0
+                    }
+                }
+                if !peer.matches_sock(WrappedRawSocket(conn.id() as RawSocket)) {
+                    return Ok(None);
+                }
+            }
             let h2_stream = conn.spawn_stream().await?;
             if conn.more_streams_allowed() {
                 self.in_use_pool.insert(reuse_hash, conn);
@@ -353,14 +494,26 @@ impl Connector {
             };
             let closed = conn.0.closed.clone();
             let (notify_evicted, watch_use) = self.idle_pool.put(&meta, conn);
-            if let Some(to) = idle_timeout {
-                let pool = self.idle_pool.clone(); //clone the arc
-                let rt = bongonet_runtime::current_handle();
-                rt.spawn(async move {
-                    pool.idle_timeout(&meta, to, notify_evicted, closed, watch_use)
-                        .await;
-                });
-            }
+            let idle_meta = IdleConnection::new(meta);
+            let pool = self.idle_pool.clone(); //clone the arc
+            let keepalive_pool_callback = self.pool_callback.clone();
+            let rt = bongonet_runtime::current_handle();
+            rt.spawn(async move {
+                if pool
+                    .idle_timeout(
+                        &idle_meta.connection,
+                        idle_timeout,
+                        notify_evicted,
+                        closed,
+                        watch_use,
+                    )
+                    .await
+                {
+                    if let Some(callback) = keepalive_pool_callback {
+                        callback(idle_meta.elapsed());
+                    }
+                }
+            });
         } else {
             self.in_use_pool.insert(reuse_hash, conn);
             drop(locked);
@@ -376,7 +529,7 @@ impl Connector {
         self.transport
             .preferred_http_version
             .get(peer)
-            .map_or(false, |v| matches!(v, ALPN::H1))
+            .is_some_and(|v| matches!(v, ALPN::H1))
     }
 }
 
@@ -388,17 +541,82 @@ impl Connector {
 // 8 Mbytes = 80 Mbytes X 100ms, which should be enough for most links.
 const H2_WINDOW_SIZE: u32 = 1 << 23;
 
-async fn handshake(
-    stream: Stream,
-    max_streams: usize,
-    h2_ping_interval: Option<Duration>,
-) -> Result<ConnectionRef> {
+/// Maximum allowed H2 window size per [RFC 9113 §6.9.1](https://datatracker.ietf.org/doc/html/rfc9113#section-6.9.1-7).
+const H2_MAX_WINDOW_SIZE: u32 = (1u32 << 31) - 1;
+
+/// Settings for HTTP/2 handshake.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use bongonet_core::connectors::http::v2::{handshake, H2HandshakeSettings};
+///
+/// // With custom window sizes
+/// let mut settings = H2HandshakeSettings::new();
+/// settings.max_streams = 100;
+/// settings.stream_window_size = Some(1 << 20);  // 1MiB
+/// settings.connection_window_size = Some(1 << 24);  // 16MiB
+/// let conn = handshake(stream, settings).await?;
+/// ```
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct H2HandshakeSettings {
+    /// The maximum number of concurrent streams allowed on this connection.
+    pub max_streams: usize,
+    /// Optional interval for sending H2 ping frames to keep the connection alive.
+    pub ping_interval: Option<Duration>,
+    /// Optional initial per-stream receive window size in bytes.
+    /// If `None`, the default of 8MB is used.
+    pub stream_window_size: Option<u32>,
+    /// Optional initial connection-level receive window size in bytes.
+    /// If `None`, the default of 8MB is used.
+    pub connection_window_size: Option<u32>,
+}
+
+impl H2HandshakeSettings {
+    /// Create a new `H2HandshakeSettings` with all defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Perform an HTTP/2 handshake on the given stream with the given settings.
+pub async fn handshake(stream: Stream, settings: H2HandshakeSettings) -> Result<ConnectionRef> {
     use bongonet_runtime::current_handle;
     use h2::client::Builder;
+
+    let max_streams = settings.max_streams;
 
     // Safe guard: new_http_session() assumes there should be at least one free stream
     if max_streams == 0 {
         return Error::e_explain(H2Error, "zero max_stream configured");
+    }
+
+    // Validate window sizes against RFC 9113 §6.9.1 limit
+    // https://datatracker.ietf.org/doc/html/rfc9113#section-6.9.1-7
+    if settings
+        .stream_window_size
+        .is_some_and(|w| w == 0 || w > H2_MAX_WINDOW_SIZE)
+    {
+        return Error::e_explain(
+            H2Error,
+            format!(
+                "stream_window_size must be between 1 and {} (2^31-1)",
+                H2_MAX_WINDOW_SIZE
+            ),
+        );
+    }
+    if settings
+        .connection_window_size
+        .is_some_and(|w| w == 0 || w > H2_MAX_WINDOW_SIZE)
+    {
+        return Error::e_explain(
+            H2Error,
+            format!(
+                "connection_window_size must be between 1 and {} (2^31-1)",
+                H2_MAX_WINDOW_SIZE
+            ),
+        );
     }
 
     let id = stream.id();
@@ -411,16 +629,16 @@ async fn handshake(
         proxy_digest: stream.get_proxy_digest(),
         socket_digest: stream.get_socket_digest(),
     };
-    // TODO: make these configurable
+    let stream_window = settings.stream_window_size.unwrap_or(H2_WINDOW_SIZE);
+    let conn_window = settings.connection_window_size.unwrap_or(H2_WINDOW_SIZE);
     let (send_req, connection) = Builder::new()
         .enable_push(false)
         .initial_max_send_streams(max_streams)
         // The limit for the server. Server push is not allowed, so this value doesn't matter
         .max_concurrent_streams(1)
         .max_frame_size(64 * 1024) // advise server to send larger frames
-        .initial_window_size(H2_WINDOW_SIZE)
-        // should this be max_streams * H2_WINDOW_SIZE?
-        .initial_connection_window_size(H2_WINDOW_SIZE)
+        .initial_window_size(stream_window)
+        .initial_connection_window_size(conn_window)
         .handshake(stream)
         .await
         .or_err(HandshakeError, "during H2 handshake")?;
@@ -442,7 +660,7 @@ async fn handshake(
             connection,
             id,
             closed_tx,
-            h2_ping_interval,
+            settings.ping_interval,
             ping_timeout_clone,
         )
         .await;
@@ -457,21 +675,30 @@ async fn handshake(
     ))
 }
 
+// TODO(slava): add custom unit tests
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::upstreams::peer::HttpPeer;
+    use bongonet_http::RequestHeader;
+    use bytes::Bytes;
+    use http::{Response, StatusCode};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     #[cfg(feature = "any_tls")]
     async fn test_connect_h2() {
         let connector = Connector::new(None);
-        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into());
+        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into()).unwrap();
         peer.options.set_http_version(2, 2);
-        let h2 = connector.new_http_session(&peer).await.unwrap();
+        let h2 = connector
+            .new_http_session::<HttpPeer, ()>(&peer)
+            .await
+            .unwrap();
         match h2 {
             HttpSession::H1(_) => panic!("expect h2"),
             HttpSession::H2(h2_stream) => assert!(!h2_stream.ping_timedout()),
+            HttpSession::Custom(_) => panic!("expect h2"),
         }
     }
 
@@ -479,39 +706,93 @@ mod tests {
     #[cfg(feature = "any_tls")]
     async fn test_connect_h1() {
         let connector = Connector::new(None);
-        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into());
+        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into()).unwrap();
         // a hack to force h1, new_http_session() in the future might validate this setting
         peer.options.set_http_version(1, 1);
-        let h2 = connector.new_http_session(&peer).await.unwrap();
+        let h2 = connector
+            .new_http_session::<HttpPeer, ()>(&peer)
+            .await
+            .unwrap();
         match h2 {
             HttpSession::H1(_) => {}
             HttpSession::H2(_) => panic!("expect h1"),
+            HttpSession::Custom(_) => panic!("expect h1"),
         }
     }
 
     #[tokio::test]
     async fn test_connect_h1_plaintext() {
         let connector = Connector::new(None);
-        let mut peer = HttpPeer::new(("1.1.1.1", 80), false, "".into());
+        let mut peer = HttpPeer::new(("1.1.1.1", 80), false, "".into()).unwrap();
         peer.options.set_http_version(2, 1);
-        let h2 = connector.new_http_session(&peer).await.unwrap();
+        let h2 = connector
+            .new_http_session::<HttpPeer, ()>(&peer)
+            .await
+            .unwrap();
         match h2 {
             HttpSession::H1(_) => {}
             HttpSession::H2(_) => panic!("expect h1"),
+            HttpSession::Custom(_) => panic!("expect h1"),
         }
+    }
+
+    #[tokio::test]
+    async fn response_parser_config_is_applied_to_h1_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request_byte = [0];
+            stream.read_exact(&mut request_byte).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nServer : bongonet\r\n folded\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut options = ConnectorOptions::new(1);
+        options.h1_response_parser_config = ResponseParserConfig::default()
+            .with_spaces_after_header_name_in_responses(true)
+            .with_obsolete_multiline_headers_in_responses(true);
+        let connector = Connector::new(Some(options));
+        let mut peer = HttpPeer::new(address, false, "".into()).unwrap();
+        peer.options.set_http_version(2, 1);
+
+        let session = connector
+            .new_http_session::<HttpPeer, ()>(&peer)
+            .await
+            .unwrap();
+        let HttpSession::H1(mut session) = session else {
+            panic!("expect h1");
+        };
+        let request = RequestHeader::build("GET", b"/", None).unwrap();
+        session
+            .write_request_header(Box::new(request))
+            .await
+            .unwrap();
+        session.read_response().await.unwrap();
+        assert_eq!(session.get_header("server").unwrap(), "bongonet folded");
+
+        server.await.unwrap();
     }
 
     #[tokio::test]
     #[cfg(feature = "any_tls")]
     async fn test_h2_single_stream() {
         let connector = Connector::new(None);
-        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into());
+        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into()).unwrap();
         peer.options.set_http_version(2, 2);
         peer.options.max_h2_streams = 1;
-        let h2 = connector.new_http_session(&peer).await.unwrap();
+        let h2 = connector
+            .new_http_session::<HttpPeer, ()>(&peer)
+            .await
+            .unwrap();
         let h2_1 = match h2 {
             HttpSession::H1(_) => panic!("expect h2"),
             HttpSession::H2(h2_stream) => h2_stream,
+            HttpSession::Custom(_) => panic!("expect h2"),
         };
 
         let id = h2_1.conn.id();
@@ -537,13 +818,17 @@ mod tests {
     #[cfg(feature = "any_tls")]
     async fn test_h2_multiple_stream() {
         let connector = Connector::new(None);
-        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into());
+        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into()).unwrap();
         peer.options.set_http_version(2, 2);
         peer.options.max_h2_streams = 3;
-        let h2 = connector.new_http_session(&peer).await.unwrap();
+        let h2 = connector
+            .new_http_session::<HttpPeer, ()>(&peer)
+            .await
+            .unwrap();
         let h2_1 = match h2 {
             HttpSession::H1(_) => panic!("expect h2"),
             HttpSession::H2(h2_stream) => h2_stream,
+            HttpSession::Custom(_) => panic!("expect h2"),
         };
 
         let id = h2_1.conn.id();
@@ -572,5 +857,483 @@ mod tests {
         // all streams are released, now the connection is idle
         let h2_5 = connector.reused_http_session(&peer).await.unwrap().unwrap();
         assert_eq!(id, h2_5.conn.id());
+    }
+
+    /// `spawn_stream` must return `Ok(None)` and mark the connection as shutting
+    /// down when the underlying I/O channel is closed (BrokenPipe).  This
+    /// exercises the BrokenPipe branch of `spawn_stream` directly without going
+    /// through the full proxy stack.
+    #[tokio::test]
+    async fn test_spawn_stream_broken_pipe_marks_shutdown() {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let (send_req, connection) = h2::client::handshake(client_io).await.unwrap();
+        let (closed_tx, closed_rx) = watch::channel(false);
+        let ping_timeout = Arc::new(AtomicBool::new(false));
+        let conn = ConnectionRef::new(send_req, closed_rx, ping_timeout, 0, 10, Digest::default());
+
+        // Drive the H2 client connection task in the background.
+        // When the connection terminates it will signal via closed_tx.
+        let conn_handle = tokio::spawn(async move {
+            let _ = connection.await;
+            // Signal that the connection task has finished.
+            let _ = closed_tx.send(true);
+        });
+
+        // Complete the server-side H2 handshake, then drop the server connection.
+        // Dropping server_conn closes the write end of the duplex, so the client
+        // connection task will read EOF and terminate with BrokenPipe.
+        let server_conn = h2::server::handshake(server_io).await.unwrap();
+        drop(server_conn);
+
+        // Wait until the client connection task has fully processed the EOF.
+        conn_handle.await.unwrap();
+
+        // spawn_stream must detect BrokenPipe, mark shutdown, and return Ok(None)
+        // so the caller can retry on a fresh connection rather than propagating the error.
+        let result = conn.spawn_stream().await;
+        assert!(result.is_ok(), "expected Ok(None), got Err");
+        assert!(result.unwrap().is_none(), "expected None stream");
+        assert!(
+            conn.is_shutting_down(),
+            "connection should be marked as shutting down"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mark_shutdown_prevents_new_streams() {
+        let (client_io, _server_io) = tokio::io::duplex(65536);
+        let (send_req, _connection) = h2::client::handshake(client_io).await.unwrap();
+        let (_closed_tx, closed_rx) = watch::channel(false);
+        let ping_timeout = Arc::new(AtomicBool::new(false));
+        let conn = ConnectionRef::new(send_req, closed_rx, ping_timeout, 0, 10, Digest::default());
+
+        assert!(conn.more_streams_allowed());
+        assert!(!conn.is_shutting_down());
+
+        conn.mark_shutdown();
+
+        assert!(conn.is_shutting_down());
+        assert!(!conn.more_streams_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_free_stream_slots() {
+        let (client_io, _server_io) = tokio::io::duplex(65536);
+        let (send_req, _connection) = h2::client::Builder::new()
+            .initial_max_send_streams(3)
+            .handshake(client_io)
+            .await
+            .unwrap();
+        let (closed_tx, closed_rx) = watch::channel(false);
+        let ping_timeout = Arc::new(AtomicBool::new(false));
+        let conn = ConnectionRef::new(send_req, closed_rx, ping_timeout, 0, 4, Digest::default());
+
+        assert_eq!(conn.free_stream_slots(), 3);
+        assert!(conn.can_accept_streams(3));
+        assert!(!conn.can_accept_streams(4));
+        assert!(!conn.can_accept_streams(0));
+
+        conn.0.current_streams.store(1, Ordering::Relaxed);
+        assert_eq!(conn.free_stream_slots(), 2);
+
+        closed_tx.send(true).unwrap();
+        assert_eq!(conn.free_stream_slots(), 0);
+
+        closed_tx.send(false).unwrap();
+        conn.mark_shutdown();
+        assert_eq!(conn.free_stream_slots(), 0);
+    }
+
+    #[cfg(all(feature = "any_tls", unix))]
+    #[tokio::test]
+    async fn test_h2_reuse_rejects_fd_mismatch() {
+        use crate::protocols::l4::socket::SocketAddr;
+        use crate::upstreams::peer::Peer;
+        use std::fmt::{Display, Formatter, Result as FmtResult};
+        use std::os::unix::prelude::AsRawFd;
+
+        #[derive(Clone)]
+        struct MismatchPeer {
+            reuse_hash: u64,
+            address: SocketAddr,
+        }
+
+        impl Display for MismatchPeer {
+            fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+                write!(f, "{:?}", self.address)
+            }
+        }
+
+        impl Peer for MismatchPeer {
+            fn address(&self) -> &SocketAddr {
+                &self.address
+            }
+
+            fn tls(&self) -> bool {
+                true
+            }
+
+            fn sni(&self) -> &str {
+                ""
+            }
+
+            fn reuse_hash(&self) -> u64 {
+                self.reuse_hash
+            }
+
+            fn matches_fd<V: AsRawFd>(&self, _fd: V) -> bool {
+                false
+            }
+        }
+
+        let connector = Connector::new(None);
+        let mut peer = HttpPeer::new(("1.1.1.1", 443), true, "one.one.one.one".into()).unwrap();
+        peer.options.set_http_version(2, 2);
+        peer.options.max_h2_streams = 1;
+
+        let h2 = connector
+            .new_http_session::<HttpPeer, ()>(&peer)
+            .await
+            .unwrap();
+        let h2_stream = match h2 {
+            HttpSession::H1(_) => panic!("expect h2"),
+            HttpSession::H2(h2_stream) => h2_stream,
+            HttpSession::Custom(_) => panic!("expect h2"),
+        };
+
+        connector.release_http_session(h2_stream, &peer, None);
+
+        let mismatch_peer = MismatchPeer {
+            reuse_hash: peer.reuse_hash(),
+            address: peer.address().clone(),
+        };
+
+        assert!(connector
+            .reused_http_session(&mismatch_peer)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_h2_handshake_settings_validation() {
+        use super::H2HandshakeSettings;
+
+        // Test zero stream window size is rejected
+        let mut settings = H2HandshakeSettings::new();
+        settings.max_streams = 100;
+        settings.stream_window_size = Some(0);
+        let (client, _server) = tokio::io::duplex(65536);
+        match handshake(Box::new(client), settings).await {
+            Err(e) => assert!(
+                e.to_string()
+                    .contains("stream_window_size must be between 1"),
+                "Unexpected error: {}",
+                e
+            ),
+            Ok(_) => panic!("Expected error for stream_window_size = 0"),
+        }
+
+        // Test zero connection window size is rejected
+        let mut settings = H2HandshakeSettings::new();
+        settings.max_streams = 100;
+        settings.connection_window_size = Some(0);
+        let (client, _server) = tokio::io::duplex(65536);
+        match handshake(Box::new(client), settings).await {
+            Err(e) => assert!(
+                e.to_string()
+                    .contains("connection_window_size must be between 1"),
+                "Unexpected error: {}",
+                e
+            ),
+            Ok(_) => panic!("Expected error for connection_window_size = 0"),
+        }
+
+        // Test exceeding max stream window size is rejected
+        let mut settings = H2HandshakeSettings::new();
+        settings.max_streams = 100;
+        settings.stream_window_size = Some(super::H2_MAX_WINDOW_SIZE + 1);
+        let (client, _server) = tokio::io::duplex(65536);
+        match handshake(Box::new(client), settings).await {
+            Err(e) => assert!(
+                e.to_string()
+                    .contains("stream_window_size must be between 1"),
+                "Unexpected error: {}",
+                e
+            ),
+            Ok(_) => panic!("Expected error for stream_window_size > max"),
+        }
+
+        // Test exceeding max connection window size is rejected
+        let mut settings = H2HandshakeSettings::new();
+        settings.max_streams = 100;
+        settings.connection_window_size = Some(super::H2_MAX_WINDOW_SIZE + 1);
+        let (client, _server) = tokio::io::duplex(65536);
+        match handshake(Box::new(client), settings).await {
+            Err(e) => assert!(
+                e.to_string()
+                    .contains("connection_window_size must be between 1"),
+                "Unexpected error: {}",
+                e
+            ),
+            Ok(_) => panic!("Expected error for connection_window_size > max"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_h2_handshake_custom_window_sizes() {
+        // Test that valid custom window sizes are accepted and handshake succeeds
+        let mut settings = H2HandshakeSettings::new();
+        settings.max_streams = 100;
+        settings.stream_window_size = Some(1 << 20); // 1MiB
+        settings.connection_window_size = Some(1 << 24); // 16MiB
+
+        let (client, server) = tokio::io::duplex(65536);
+
+        // Spawn server side
+        tokio::spawn(async move {
+            let mut server_conn = h2::server::handshake(server).await.unwrap();
+            if let Some(result) = server_conn.accept().await {
+                let (_request, mut respond) = result.unwrap();
+                let resp = Response::builder().status(StatusCode::OK).body(()).unwrap();
+                let mut stream = respond.send_response(resp, false).unwrap();
+                stream.send_data(Bytes::from("ok"), true).unwrap();
+                server_conn.graceful_shutdown();
+            }
+            // Drive the server connection until the client closes
+            while let Some(_res) = server_conn.accept().await {}
+        });
+
+        // Client side - should succeed with custom window sizes
+        let conn = handshake(Box::new(client), settings).await.unwrap();
+
+        // Verify we can spawn a stream and complete a request/response cycle
+        let mut stream = conn.spawn_stream().await.unwrap().unwrap();
+        let mut request = RequestHeader::build("GET", b"/", None).unwrap();
+        request
+            .insert_header(http::header::HOST, "example.com")
+            .unwrap();
+        stream
+            .write_request_header(Box::new(request), true)
+            .unwrap();
+
+        stream.read_response_header().await.unwrap();
+        assert_eq!(stream.response_header().unwrap().status, 200);
+    }
+
+    /// `spawn_stream()` must return `Ok(None)` when the server sends
+    /// GOAWAY(NO_ERROR) before any streams are opened.
+    #[tokio::test]
+    async fn test_spawn_stream_goaway_no_error_returns_none() {
+        let (client_io, server_io) = tokio::io::duplex(65536);
+        let (send_req, connection) = h2::client::handshake(client_io).await.unwrap();
+        let (closed_tx, closed_rx) = watch::channel(false);
+        let ping_timeout = Arc::new(AtomicBool::new(false));
+        let conn = ConnectionRef::new(send_req, closed_rx, ping_timeout, 0, 10, Digest::default());
+
+        let conn_handle = tokio::spawn(async move {
+            let _ = connection.await;
+            let _ = closed_tx.send(true);
+        });
+
+        let mut server_conn = h2::server::handshake(server_io).await.unwrap();
+        server_conn.graceful_shutdown();
+        let _ = server_conn.accept().await;
+        drop(server_conn);
+
+        conn_handle.await.unwrap();
+
+        let result = conn.spawn_stream().await;
+        assert!(
+            result.is_ok(),
+            "expected Ok(None), got Err: {:?}",
+            result.as_ref().err()
+        );
+        assert!(result.unwrap().is_none());
+        assert!(conn.is_shutting_down());
+    }
+
+    /// A server that writes HTTP/2 frames by hand. `h2`'s own server stops writing to a stream
+    /// as soon as it reads the client's RST_STREAM, so it cannot model frames that a real server
+    /// had already sent when the client cancelled.
+    mod raw_h2_server {
+        use std::io;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf};
+        use tokio::sync::mpsc;
+
+        const DATA: u8 = 0x0;
+        pub const HEADERS: u8 = 0x1;
+        pub const RST_STREAM: u8 = 0x3;
+        const SETTINGS: u8 = 0x4;
+        pub const GOAWAY: u8 = 0x7;
+        const END_STREAM: u8 = 0x1;
+        const END_HEADERS: u8 = 0x4;
+        const ACK: u8 = 0x1;
+        pub const CANCEL: u32 = 0x8;
+        /// HPACK static table index 8, `:status: 200`.
+        const STATUS_200: &[u8] = &[0x88];
+        const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+        pub struct Frame {
+            pub kind: u8,
+            pub stream_id: u32,
+            pub payload: Vec<u8>,
+        }
+
+        pub struct Server {
+            writer: WriteHalf<DuplexStream>,
+        }
+
+        impl Server {
+            /// Completes the server side of the connection preface and returns the server with
+            /// a channel that yields every frame the client sends afterwards.
+            pub async fn accept(io: DuplexStream) -> (Self, mpsc::UnboundedReceiver<Frame>) {
+                let (mut reader, writer) = tokio::io::split(io);
+                let mut preface = [0u8; PREFACE.len()];
+                reader.read_exact(&mut preface).await.unwrap();
+                assert_eq!(preface, PREFACE);
+
+                let mut server = Server { writer };
+                server.write_frame(SETTINGS, 0, 0, &[]).await.unwrap();
+                // The client sends its SETTINGS with the preface.
+                server.write_frame(SETTINGS, ACK, 0, &[]).await.unwrap();
+
+                let (tx, rx) = mpsc::unbounded_channel();
+                tokio::spawn(read_frames(reader, tx));
+                (server, rx)
+            }
+
+            /// Fails once the client has closed the connection.
+            pub async fn write_frame(
+                &mut self,
+                kind: u8,
+                flags: u8,
+                stream_id: u32,
+                payload: &[u8],
+            ) -> io::Result<()> {
+                let len = payload.len() as u32;
+                let mut frame = Vec::with_capacity(9 + payload.len());
+                frame.extend_from_slice(&len.to_be_bytes()[1..]);
+                frame.push(kind);
+                frame.push(flags);
+                frame.extend_from_slice(&stream_id.to_be_bytes());
+                frame.extend_from_slice(payload);
+                self.writer.write_all(&frame).await
+            }
+
+            /// Writes a 200 response with `body` on the stream.
+            pub async fn write_response(&mut self, stream_id: u32, body: &[u8]) -> io::Result<()> {
+                self.write_frame(HEADERS, END_HEADERS, stream_id, STATUS_200)
+                    .await?;
+                self.write_frame(DATA, END_STREAM, stream_id, body).await
+            }
+        }
+
+        async fn read_frames(mut reader: ReadHalf<DuplexStream>, tx: mpsc::UnboundedSender<Frame>) {
+            loop {
+                let mut header = [0u8; 9];
+                if reader.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let len = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+                let stream_id =
+                    u32::from_be_bytes([header[5], header[6], header[7], header[8]]) & 0x7fff_ffff;
+                let mut payload = vec![0u8; len];
+                if reader.read_exact(&mut payload).await.is_err() {
+                    return;
+                }
+                let frame = Frame {
+                    kind: header[3],
+                    stream_id,
+                    payload,
+                };
+                if tx.send(frame).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// When the client cancels a stream, the server may already have sent its response, and
+    /// RFC 9113 section 5.1 requires the client to discard those frames. However many streams
+    /// the client cancels over the life of the connection, the late frames must not close it and
+    /// fail the requests in flight on it.
+    #[tokio::test]
+    async fn test_h2_late_frames_on_cancelled_streams_keep_connection() {
+        use raw_h2_server::*;
+
+        const ROUNDS: usize = 21;
+        const CONCURRENT: usize = 100;
+
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let mut settings = H2HandshakeSettings::new();
+        settings.max_streams = CONCURRENT + 1;
+        let conn = handshake(Box::new(client), settings).await.unwrap();
+        let (mut server, mut client_frames) = Server::accept(server).await;
+
+        let request = || {
+            let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+            req.insert_header(http::header::HOST, "example.com")
+                .unwrap();
+            Box::new(req)
+        };
+
+        // A slow request stays in flight for the whole test.
+        let mut in_flight = conn.spawn_stream().await.unwrap().unwrap();
+        in_flight.write_request_header(request(), true).unwrap();
+        let in_flight_id = loop {
+            let frame = client_frames.recv().await.unwrap();
+            if frame.kind == HEADERS {
+                break frame.stream_id;
+            }
+        };
+
+        let mut late_responses = 0;
+        'rounds: for _ in 0..ROUNDS {
+            // The client abandons requests, like a proxy whose downstream left.
+            let mut cancelled = Vec::with_capacity(CONCURRENT);
+            for _ in 0..CONCURRENT {
+                let Ok(Some(mut session)) = conn.spawn_stream().await else {
+                    break 'rounds;
+                };
+                session.write_request_header(request(), true).unwrap();
+                cancelled.push(session);
+            }
+            drop(cancelled);
+
+            // The server had already answered each request when its RST_STREAM arrived.
+            let mut answered = 0;
+            while answered < CONCURRENT {
+                let Some(frame) = client_frames.recv().await else {
+                    break 'rounds;
+                };
+                if frame.kind != RST_STREAM || frame.payload != CANCEL.to_be_bytes() {
+                    continue;
+                }
+                if server
+                    .write_response(frame.stream_id, &[0; 1024])
+                    .await
+                    .is_err()
+                {
+                    break 'rounds;
+                }
+                answered += 1;
+                late_responses += 1;
+            }
+        }
+
+        let _ = server.write_response(in_flight_id, b"ok").await;
+        let result = in_flight.read_response_header().await;
+        assert!(
+            result.is_ok(),
+            "the in-flight request failed: {}",
+            result.unwrap_err()
+        );
+        assert_eq!(in_flight.response_header().unwrap().status, 200);
+        while let Ok(frame) = client_frames.try_recv() {
+            assert_ne!(frame.kind, GOAWAY, "the client closed the connection");
+        }
+        // More late responses than h2's default limit of 1024 local resets.
+        assert_eq!(late_responses, ROUNDS * CONCURRENT);
     }
 }

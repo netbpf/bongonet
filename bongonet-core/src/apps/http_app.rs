@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The abstraction and implementation interface for service application logic
+//! A simple HTTP application trait that maps a request to a response
 
 use async_trait::async_trait;
 use bongonet_http::ResponseHeader;
@@ -20,11 +20,11 @@ use http::Response;
 use log::{debug, error, trace};
 use std::sync::Arc;
 
-use crate::apps::HttpServerApp;
+use crate::apps::{HttpPersistentSettings, HttpServerApp, HttpServerOptions, ReusedHttpStream};
 use crate::modules::http::{HttpModules, ModuleBuilder};
+use crate::protocols::http::v2::server::H2Options;
 use crate::protocols::http::HttpTask;
 use crate::protocols::http::ServerSession;
-use crate::protocols::Stream;
 use crate::server::ShutdownWatch;
 
 /// This trait defines how to map a request to a response
@@ -51,7 +51,7 @@ where
         self: &Arc<Self>,
         mut http: ServerSession,
         shutdown: &ShutdownWatch,
-    ) -> Option<Stream> {
+    ) -> Option<ReusedHttpStream> {
         match http.read_request().await {
             Ok(res) => match res {
                 false => {
@@ -97,8 +97,9 @@ where
                 ),
             }
         }
+        let persistent_settings = HttpPersistentSettings::for_session(&http);
         match http.finish().await {
-            Ok(c) => c,
+            Ok(c) => c.map(|s| ReusedHttpStream::from_reusable_stream(s, persistent_settings)),
             Err(e) => {
                 error!("HTTP server fails to finish the request: {e}");
                 None
@@ -111,6 +112,8 @@ where
 pub struct HttpServer<SV> {
     app: SV,
     modules: HttpModules,
+    pub server_options: Option<HttpServerOptions>,
+    pub h2_options: Option<H2Options>,
 }
 
 impl<SV> HttpServer<SV> {
@@ -119,6 +122,8 @@ impl<SV> HttpServer<SV> {
         HttpServer {
             app,
             modules: HttpModules::new(),
+            server_options: None,
+            h2_options: None,
         }
     }
 
@@ -137,7 +142,7 @@ where
         self: &Arc<Self>,
         mut http: ServerSession,
         shutdown: &ShutdownWatch,
-    ) -> Option<Stream> {
+    ) -> Option<ReusedHttpStream> {
         match http.read_request().await {
             Ok(res) => match res {
                 false => {
@@ -200,12 +205,21 @@ where
                 http.request_summary()
             ),
         }
+        let persistent_settings = HttpPersistentSettings::for_session(&http);
         match http.finish().await {
-            Ok(c) => c,
+            Ok(c) => c.map(|s| ReusedHttpStream::from_reusable_stream(s, persistent_settings)),
             Err(e) => {
                 error!("HTTP server fails to finish the request: {e}");
                 None
             }
         }
+    }
+
+    fn h2_options(&self) -> Option<H2Options> {
+        self.h2_options.clone()
+    }
+
+    fn server_options(&self) -> Option<&HttpServerOptions> {
+        self.server_options.as_ref()
     }
 }
