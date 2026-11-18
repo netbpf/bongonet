@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::net::ToSocketAddrs;
 
@@ -52,7 +51,7 @@ impl ProxyHttp for Json2Yaml {
         _session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let peer = Box::new(HttpPeer::new(self.addr, false, HOST.to_owned()));
+        let peer = Box::new(HttpPeer::new(self.addr, false, HOST.to_owned())?);
         Ok(peer)
     }
 
@@ -85,7 +84,7 @@ impl ProxyHttp for Json2Yaml {
         Ok(())
     }
 
-    fn response_body_filter(
+    async fn response_body_filter(
         &self,
         _session: &mut Session,
         body: &mut Option<Bytes>,
@@ -117,7 +116,7 @@ impl ProxyHttp for Json2Yaml {
 fn main() {
     env_logger::init();
 
-    let opt = Opt::parse();
+    let opt = Opt::parse_args();
     let mut my_server = Server::new(Some(opt)).unwrap();
     my_server.bootstrap();
 

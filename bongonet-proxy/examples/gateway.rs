@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use clap::Parser;
 use log::info;
 use prometheus::register_int_counter;
 
@@ -65,7 +64,7 @@ impl ProxyHttp for MyGateway {
 
         info!("connecting to {addr:?}");
 
-        let peer = Box::new(HttpPeer::new(addr, true, "one.one.one.one".to_string()));
+        let peer = Box::new(HttpPeer::new(addr, true, "one.one.one.one".to_string())?);
         Ok(peer)
     }
 
@@ -117,7 +116,7 @@ fn main() {
     env_logger::init();
 
     // read command line arguments
-    let opt = Opt::parse();
+    let opt = Opt::parse_args();
     let mut my_server = Server::new(Some(opt)).unwrap();
     my_server.bootstrap();
 
@@ -130,8 +129,7 @@ fn main() {
     my_proxy.add_tcp("0.0.0.0:6191");
     my_server.add_service(my_proxy);
 
-    let mut prometheus_service_http =
-        bongonet_core::services::listening::Service::prometheus_http_service();
+    let mut prometheus_service_http = bongonet_prometheus::prometheus_http_service();
     prometheus_service_http.add_tcp("127.0.0.1:6192");
     my_server.add_service(prometheus_service_http);
 

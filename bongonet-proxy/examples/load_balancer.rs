@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,6 @@
 
 use async_trait::async_trait;
 use bongonet_core::services::background::background_service;
-use clap::Parser;
 use log::info;
 use std::{sync::Arc, time::Duration};
 
@@ -40,7 +39,11 @@ impl ProxyHttp for LB {
 
         info!("upstream peer is: {:?}", upstream);
 
-        let peer = Box::new(HttpPeer::new(upstream, true, "one.one.one.one".to_string()));
+        let peer = Box::new(HttpPeer::new(
+            upstream,
+            true,
+            "one.one.one.one".to_string(),
+        )?);
         Ok(peer)
     }
 
@@ -62,7 +65,7 @@ fn main() {
     env_logger::init();
 
     // read command line arguments
-    let opt = Opt::parse();
+    let opt = Opt::parse_args();
     let mut my_server = Server::new(Some(opt)).unwrap();
     my_server.bootstrap();
 

@@ -1,4 +1,4 @@
-// Copyright 2024 Khulnasoft, Ltd.
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use clap::Parser;
 
 use bongonet_core::server::Server;
 use bongonet_core::upstreams::peer::HttpPeer;
@@ -27,7 +26,7 @@ use bongonet_core::{
 };
 use bongonet_proxy::{ProxyHttp, Session};
 
-/// This example shows how to use the gRPC-web bridge module
+// This example shows how to use the gRPC-web bridge module
 
 pub struct GrpcWebBridgeProxy;
 
@@ -66,7 +65,7 @@ impl ProxyHttp for GrpcWebBridgeProxy {
             ("1.1.1.1", 443),
             true,
             "one.one.one.one".to_string(),
-        ));
+        )?);
         Ok(grpc_peer)
     }
 }
@@ -77,7 +76,7 @@ fn main() {
     env_logger::init();
 
     // read command line arguments
-    let opt = Opt::parse();
+    let opt = Opt::parse_args();
     let mut my_server = Server::new(Some(opt)).unwrap();
     my_server.bootstrap();
 

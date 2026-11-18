@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use clap::Parser;
 
+use bongonet_core::connectors::l4::ConnectErrorExt;
 use bongonet_core::server::Server;
 use bongonet_core::upstreams::peer::HttpPeer;
 use bongonet_core::Result;
@@ -47,6 +47,9 @@ impl ProxyHttp for BackoffRetryProxy {
         ctx: &mut Self::CTX,
         e: Box<Error>,
     ) -> Box<Error> {
+        if let Some(local_addr) = e.connect_local_addr() {
+            info!("connection attempt used local address: {local_addr}");
+        }
         ctx.retries += 1;
         let mut retry_e = e;
         retry_e.set_retry(true);
@@ -67,7 +70,7 @@ impl ProxyHttp for BackoffRetryProxy {
             info!("sleeping for ms: {sleep_ms:?}");
             tokio::time::sleep(sleep_ms).await;
         }
-        let mut peer = HttpPeer::new(("10.0.0.1", 80), false, "".into());
+        let mut peer = HttpPeer::new(("10.0.0.1", 80), false, "".into())?;
         peer.options.connection_timeout = Some(Duration::from_millis(100));
         Ok(Box::new(peer))
     }
@@ -79,7 +82,7 @@ fn main() {
     env_logger::init();
 
     // read command line arguments
-    let opt = Opt::parse();
+    let opt = Opt::parse_args();
     let mut my_server = Server::new(Some(opt)).unwrap();
     my_server.bootstrap();
 

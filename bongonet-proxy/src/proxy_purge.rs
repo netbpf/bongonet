@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use bongonet_cache::PurgeAction;
 use bongonet_core::protocols::http::error_resp;
 use std::borrow::Cow;
 
@@ -59,18 +60,26 @@ static NOT_PURGEABLE: Lazy<ResponseHeader> = Lazy::new(|| gen_purge_response(405
 // on cache storage or proxy error
 static INTERNAL_ERROR: Lazy<ResponseHeader> = Lazy::new(|| error_resp::gen_error_response(500));
 
-impl<SV> HttpProxy<SV> {
+impl<SV, C, DS> HttpProxy<SV, C, DS>
+where
+    C: custom::Connector,
+    DS: DownstreamSession,
+{
     pub(crate) async fn proxy_purge(
         &self,
-        session: &mut Session,
-        ctx: &mut SV::CTX,
+        session: &mut Session<DS>,
+        ctx: &mut <SV as ProxyHttp<DS>>::CTX,
     ) -> Option<(bool, Option<Box<Error>>)>
     where
-        SV: ProxyHttp + Send + Sync,
-        SV::CTX: Send + Sync,
+        SV: ProxyHttp<DS> + Send + Sync,
+        <SV as ProxyHttp<DS>>::CTX: Send + Sync,
     {
         let purge_status = if session.cache.enabled() {
-            match session.cache.purge().await {
+            let purged = match self.inner.purge_action(session, ctx) {
+                PurgeAction::Delete => session.cache.purge().await,
+                PurgeAction::Expire => session.cache.expire().await,
+            };
+            match purged {
                 Ok(found) => {
                     if found {
                         PurgeStatus::Found

@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use clap::Parser;
 
 use bongonet_core::modules::http::HttpModules;
 use bongonet_core::server::configuration::Opt;
@@ -23,7 +22,7 @@ use bongonet_core::Result;
 use bongonet_http::RequestHeader;
 use bongonet_proxy::{ProxyHttp, Session};
 
-/// This example shows how to build and import 3rd party modules
+// This example shows how to build and import 3rd party modules
 
 /// A simple ACL to check "Authorization: basic $credential" header
 mod my_acl {
@@ -102,7 +101,7 @@ impl ProxyHttp for MyProxy {
             ("1.1.1.1", 443),
             true,
             "one.one.one.one".to_string(),
-        ));
+        )?);
         Ok(peer)
     }
 }
@@ -115,7 +114,7 @@ fn main() {
     env_logger::init();
 
     // read command line arguments
-    let opt = Opt::parse();
+    let opt = Opt::parse_args();
     let mut my_server = Server::new(Some(opt)).unwrap();
     my_server.bootstrap();
 
