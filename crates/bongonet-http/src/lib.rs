@@ -1724,13 +1724,13 @@ mod tests {
         req.set_method(Method::CONNECT);
         req.set_uri(
             Uri::builder()
-                .authority("bongonet.org:443")
+                .authority("bongonet.khulnasoft.com:443")
                 .build()
                 .unwrap(),
         );
 
         assert!(req.uri.path_and_query().is_none());
-        assert_eq!(b"bongonet.org:443", req.raw_path());
+        assert_eq!(b"bongonet.khulnasoft.com:443", req.raw_path());
         assert!(req.raw_path_is_utf8());
     }
 

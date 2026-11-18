@@ -424,7 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn upstream_streams_coalesce_writes_only_when_the_peer_enables_it() {
-        let mut peer = HttpPeer::new("127.0.0.1:443", true, "bongonet.org".into()).unwrap();
+        let mut peer = HttpPeer::new("127.0.0.1:443", true, "bongonet.khulnasoft.com".into()).unwrap();
         peer.options.verify_cert = false;
         assert!(!connect_locally(&peer).await.write_coalescing());
 

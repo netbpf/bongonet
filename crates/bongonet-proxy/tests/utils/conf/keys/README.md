@@ -40,7 +40,7 @@ openssl req -config openssl.cnf -new -x509 -key key.pem -out server_rustls.crt -
 openssl genrsa -out intermediate.key 2048
 
 # Generate the signing request with the subject details filled in
-openssl req -new -key intermediate.key -out intermediate.csr -subj '/C=US/ST=CA/O=Intermediate CA/CN=int.bongonet.org'
+openssl req -new -key intermediate.key -out intermediate.csr -subj '/C=US/ST=CA/O=Intermediate CA/CN=int.bongonet.khulnasoft.com'
 
 # Evaluate the signing request with the root certificate
 openssl x509 -req -in intermediate.csr -CA root.crt -CAkey root.key -CAcreateserial -CAserial intermediate.srl -extfile intermediate.cnf -extensions v3_intermediate_ca -out intermediate.crt -days 3650 -sha256 
@@ -53,7 +53,7 @@ openssl x509 -req -in intermediate.csr -CA root.crt -CAkey root.key -CAcreateser
 openssl genrsa -out leaf.key 2048
 
 # Generate the signing request with the subject details filled in
-openssl req -new -key leaf.key -out leaf.csr -subj '/C=US/ST=CA/O=Internet Widgits Pty Ltd/CN=bongonet.org'
+openssl req -new -key leaf.key -out leaf.csr -subj '/C=US/ST=CA/O=Internet Widgits Pty Ltd/CN=bongonet.khulnasoft.com'
 
 # Evaluate the signing request with the root certificate
 openssl x509 -req -in leaf.csr -CA intermediate.crt -CAkey intermediate.key -CAcreateserial -CAserial leaf.srl -extfile leaf.cnf -extensions v3 -out leaf.crt -days 3650 -sha256 

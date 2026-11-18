@@ -1896,7 +1896,7 @@ mod tests_stream {
     async fn read_2_buf() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\n\r\n";
         let mock_io = Builder::new().read(&input1[..]).read(&input2[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         let res = http_stream.read_request().await;
@@ -1910,14 +1910,14 @@ mod tests_stream {
         assert_eq!(b"/", http_stream.get_path());
         assert_eq!(Version::HTTP_11, http_stream.req_header().version);
 
-        assert_eq!(b"bongonet.org", http_stream.get_header_bytes("Host"));
+        assert_eq!(b"bongonet.khulnasoft.com", http_stream.get_header_bytes("Host"));
     }
 
     #[tokio::test]
     async fn read_with_body_content_length() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nContent-Length: 3\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n";
         let input3 = b"abc";
         let mock_io = Builder::new()
             .read(&input1[..])
@@ -1937,7 +1937,7 @@ mod tests_stream {
     async fn read_with_body_timeout() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nContent-Length: 3\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n";
         let input3 = b"abc";
         let mock_io = Builder::new()
             .read(&input1[..])
@@ -1957,7 +1957,7 @@ mod tests_stream {
     async fn read_with_body_content_length_single_read() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nContent-Length: 3\r\n\r\nabc";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\nabc";
         let mock_io = Builder::new().read(&input1[..]).read(&input2[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
@@ -1972,7 +1972,7 @@ mod tests_stream {
     async fn read_with_body_http10() {
         init_log();
         let input1 = b"GET / HTTP/1.0\r\n";
-        let input2 = b"Host: bongonet.org\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\n\r\n";
         let input3 = b"a"; // This should NOT be read as body
         let input4 = b""; // simulating close - should also NOT be reached
         let mock_io = Builder::new()
@@ -1994,7 +1994,7 @@ mod tests_stream {
         init_log();
         // should have 0 body, even when data follows the headers
         let input1 = b"GET / HTTP/1.0\r\n";
-        let input2 = b"Host: bongonet.org\r\n\r\na";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\n\r\na";
         let mock_io = Builder::new().read(&input1[..]).read(&input2[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
@@ -2009,7 +2009,7 @@ mod tests_stream {
     async fn read_http11_default_no_body() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\n\r\n";
         let mock_io = Builder::new().read(&input1[..]).read(&input2[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
@@ -2023,7 +2023,7 @@ mod tests_stream {
     async fn read_http10_with_content_length() {
         init_log();
         let input1 = b"POST / HTTP/1.0\r\n";
-        let input2 = b"Host: bongonet.org\r\nContent-Length: 3\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n";
         let input3 = b"abc";
         let mock_io = Builder::new()
             .read(&input1[..])
@@ -2042,7 +2042,7 @@ mod tests_stream {
     async fn read_with_body_chunked_0_incomplete() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n";
         let input3 = b"0\r\n";
         let mock_io = Builder::new()
             .read(&input1[..])
@@ -2063,7 +2063,7 @@ mod tests_stream {
     async fn read_with_body_chunked_0_extra() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n";
         let input3 = b"0\r\n";
         let input4 = b"abc";
         let mock_io = Builder::new()
@@ -2088,7 +2088,7 @@ mod tests_stream {
     async fn read_with_body_chunked_single_read() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n";
         let input3 = b"0\r\n\r\n";
         let mock_io = Builder::new()
             .read(&input1[..])
@@ -2114,7 +2114,7 @@ mod tests_stream {
     async fn read_with_body_chunked_single_read_extra() {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n";
         let input3 = b"0\r\n\r\nabc";
         let mock_io = Builder::new()
             .read(&input1[..])
@@ -2153,7 +2153,7 @@ mod tests_stream {
     ) {
         init_log();
         let input1 = b"GET / HTTP/1.1\r\n";
-        let mut input2 = "Host: bongonet.org\r\n".to_owned();
+        let mut input2 = "Host: bongonet.khulnasoft.com\r\n".to_owned();
 
         if let Some(transfer_encoding) = transfer_encoding_header {
             input2 += &format!("{transfer_encoding}: chunked\r\n");
@@ -2197,7 +2197,7 @@ mod tests_stream {
     async fn validate_request_rejects_invalid_content_length(#[case] invalid_value: &str) {
         init_log();
         let input = format!(
-            "POST / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: {}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: {}\r\n\r\n",
             invalid_value
         );
         let mock_io = Builder::new().read(input.as_bytes()).build();
@@ -2216,7 +2216,7 @@ mod tests_stream {
     async fn validate_request_accepts_valid_content_length(#[case] valid_value: &str) {
         init_log();
         let input = format!(
-            "POST / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: {}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: {}\r\n\r\n",
             valid_value
         );
         let mock_io = Builder::new().read(input.as_bytes()).build();
@@ -2228,7 +2228,7 @@ mod tests_stream {
     #[tokio::test]
     async fn validate_request_accepts_no_content_length() {
         init_log();
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         let res = http_stream.read_request().await;
@@ -2239,7 +2239,7 @@ mod tests_stream {
     #[should_panic(expected = "There is still data left to read.")]
     async fn read_invalid() {
         let input1 = b"GET / HTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\n\r\n";
         let mock_io = Builder::new().read(&input1[..]).read(&input2[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         let res = http_stream.read_request().await;
@@ -2248,7 +2248,7 @@ mod tests_stream {
 
     #[tokio::test]
     async fn read_invalid_header_end() {
-        let input = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 3\r\r\nConnection: keep-alive\r\n\r\nabc";
+        let input = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 3\r\r\nConnection: keep-alive\r\n\r\nabc";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         let res = http_stream.read_request().await;
@@ -2256,7 +2256,7 @@ mod tests_stream {
     }
 
     async fn build_upgrade_req(upgrade: &str, conn: &str) -> HttpSession {
-        let input = format!("GET / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: {upgrade}\r\nConnection: {conn}\r\n\r\n");
+        let input = format!("GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: {upgrade}\r\nConnection: {conn}\r\n\r\n");
         let mock_io = Builder::new().read(input.as_bytes()).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
@@ -2266,28 +2266,28 @@ mod tests_stream {
     #[tokio::test]
     async fn read_upgrade_req() {
         // http 1.0
-        let input = b"GET / HTTP/1.0\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        let input = b"GET / HTTP/1.0\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
         assert!(!http_stream.is_upgrade_req());
 
         // different method
-        let input = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        let input = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
         assert!(http_stream.is_upgrade_req());
 
         // missing upgrade header
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nConnection: upgrade\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nConnection: upgrade\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
         assert!(!http_stream.is_upgrade_req());
 
         // no connection header
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: WebSocket\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: WebSocket\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
@@ -2303,9 +2303,9 @@ mod tests_stream {
             .is_upgrade_req());
     }
 
-    const POST_CL_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\nContent-Length: 10\r\n\r\n";
+    const POST_CL_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\nContent-Length: 10\r\n\r\n";
     const POST_BODY_DATA: &[u8] = b"abcdefghij";
-    const POST_CHUNKED_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const POST_CHUNKED_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\nTransfer-Encoding: chunked\r\n\r\n";
     const POST_BODY_DATA_CHUNKED: &[u8] = b"3\r\nabc\r\n7\r\ndefghij\r\n0\r\n\r\n";
 
     #[rstest]
@@ -2501,7 +2501,7 @@ mod tests_stream {
 
     #[tokio::test]
     async fn read_upgrade_req_with_1xx_response() {
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
         let mock_io = Builder::new()
             .read(&input[..])
             .write(b"HTTP/1.1 100 Continue\r\n\r\n")
@@ -2535,7 +2535,7 @@ mod tests_stream {
 
     #[tokio::test]
     async fn test_upgrade_without_content_length_with_ws_data() {
-        let request = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        let request = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
         let ws_data = b"websocket data";
 
         let mock_io = Builder::new()
@@ -2576,7 +2576,7 @@ mod tests_stream {
     #[tokio::test]
     async fn set_server_keepalive() {
         // close
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nConnection: close\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nConnection: close\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
@@ -2587,7 +2587,7 @@ mod tests_stream {
         assert_eq!(http_stream.keepalive_timeout, KeepaliveStatus::Off);
 
         // explicit keep-alive
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nConnection: keep-alive\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nConnection: keep-alive\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         // default is infinite for 1.1
@@ -2601,7 +2601,7 @@ mod tests_stream {
         );
 
         // not specified
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
@@ -2888,7 +2888,7 @@ mod tests_stream {
     async fn read_with_illegal() {
         init_log();
         let input1 = b"GET /a?q=b c HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nContent-Length: 3\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n";
         let input3 = b"abc";
         let mock_io = Builder::new()
             .read(&input1[..])
@@ -2906,7 +2906,7 @@ mod tests_stream {
 
     #[tokio::test]
     async fn read_request_with_raised_header_count_limit() {
-        let mut input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\n".to_vec();
+        let mut input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n".to_vec();
         for i in 0..4095 {
             input.extend_from_slice(format!("x-{i}: value-{i}\r\n").as_bytes());
         }
@@ -2923,7 +2923,7 @@ mod tests_stream {
 
     #[tokio::test]
     async fn default_header_count_limit_is_preserved() {
-        let mut input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\n".to_vec();
+        let mut input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n".to_vec();
         for i in 0..256 {
             input.extend_from_slice(format!("x-{i}: value\r\n").as_bytes());
         }
@@ -2946,12 +2946,12 @@ mod tests_stream {
         // rejected by the ingress authority validation, which this fixture is not
         // exercising.
         let input =
-            b"GET http://bongonet.org:8080/a?q=b HTTP/1.1\r\nHost: bongonet.org:8080\r\n\r\n";
+            b"GET http://bongonet.khulnasoft.com:8080/a?q=b HTTP/1.1\r\nHost: bongonet.khulnasoft.com:8080\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
         assert_eq!(
-            &b"http://bongonet.org:8080/a?q=b"[..],
+            &b"http://bongonet.khulnasoft.com:8080/a?q=b"[..],
             http_stream.get_path()
         );
         let uri = &http_stream.req_header().uri;
@@ -2970,7 +2970,7 @@ mod tests_stream {
         // consistent to get past ingress validation. Pin the rejection it relies on, so
         // that agreement stays a deliberate property of the fixture rather than an
         // assumption that could silently stop holding.
-        let input = b"GET http://bongonet.org:8080/a?q=b HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let input = b"GET http://bongonet.khulnasoft.com:8080/a?q=b HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         let err = http_stream.read_request().await.unwrap_err();
@@ -2986,11 +2986,11 @@ mod tests_stream {
     async fn read_authority_form_request_target() {
         init_log();
         // RFC 9112 §3.2.3: authority-form reaches the tunnel destination verbatim.
-        let input = b"CONNECT bongonet.org:443 HTTP/1.1\r\nHost: bongonet.org:443\r\n\r\n";
+        let input = b"CONNECT bongonet.khulnasoft.com:443 HTTP/1.1\r\nHost: bongonet.khulnasoft.com:443\r\n\r\n";
         let mock_io = Builder::new().read(&input[..]).build();
         let mut http_stream = HttpSession::new(Box::new(mock_io));
         http_stream.read_request().await.unwrap();
-        assert_eq!(&b"bongonet.org:443"[..], http_stream.get_path());
+        assert_eq!(&b"bongonet.khulnasoft.com:443"[..], http_stream.get_path());
         assert_eq!(Some(&Method::CONNECT), http_stream.get_method());
     }
 
@@ -2999,27 +2999,27 @@ mod tests_stream {
         init_log();
         // in query string
         let input = BytesMut::from(
-            &b"GET /a?q=<\"b c\"> HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 3\r\n\r\n"[..],
+            &b"GET /a?q=<\"b c\"> HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n"[..],
         );
         let output = escape_illegal_request_line(&input).unwrap();
         assert_eq!(
             &output,
-            &b"GET /a?q=%3C%22b%20c%22%3E HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 3\r\n\r\n"[..]
+            &b"GET /a?q=%3C%22b%20c%22%3E HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n"[..]
         );
 
         // in path
         let input = BytesMut::from(
-            &b"GET /a:\"bc\" HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 3\r\n\r\n"[..],
+            &b"GET /a:\"bc\" HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n"[..],
         );
         let output = escape_illegal_request_line(&input).unwrap();
         assert_eq!(
             &output,
-            &b"GET /a:%22bc%22 HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 3\r\n\r\n"[..]
+            &b"GET /a:%22bc%22 HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n"[..]
         );
 
         // empty uri, unable to parse
         let input = BytesMut::from(
-            &b"GET  HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 3\r\n\r\n"[..],
+            &b"GET  HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n"[..],
         );
         assert!(escape_illegal_request_line(&input).is_none());
     }
@@ -3131,7 +3131,7 @@ mod tests_stream {
         // we must disable keepalive per RFC 9112 Section 6.1
         // https://datatracker.ietf.org/doc/html/rfc9112#section-6.1-15
         let input = b"POST / HTTP/1.1\r\n\
-Host: bongonet.org\r\n\
+Host: bongonet.khulnasoft.com\r\n\
 Transfer-Encoding: chunked\r\n\
 Content-Length: 10\r\n\
 \r\n\
@@ -3163,7 +3163,7 @@ hello\r\n\
     async fn test_http10_request_with_transfer_encoding_rejected() {
         // HTTP/1.0 requests MUST NOT contain Transfer-Encoding
         let input = b"POST / HTTP/1.0\r\n\
-Host: bongonet.org\r\n\
+Host: bongonet.khulnasoft.com\r\n\
 Transfer-Encoding: chunked\r\n\
 \r\n\
 5\r\n\
@@ -3185,7 +3185,7 @@ hello\r\n\
     async fn test_http10_request_without_transfer_encoding_accepted() {
         // HTTP/1.0 requests without Transfer-Encoding should be accepted
         let input = b"POST / HTTP/1.0\r\n\
-Host: bongonet.org\r\n\
+Host: bongonet.khulnasoft.com\r\n\
 Content-Length: 5\r\n\
 \r\n\
 hello";
@@ -3202,7 +3202,7 @@ hello";
     async fn test_http11_request_with_transfer_encoding_accepted() {
         // HTTP/1.1 with Transfer-Encoding should be accepted (contrast with HTTP/1.0)
         let input = b"POST / HTTP/1.1\r\n\
-Host: bongonet.org\r\n\
+Host: bongonet.khulnasoft.com\r\n\
 Transfer-Encoding: chunked\r\n\
 \r\n\
 5\r\n\
@@ -3223,7 +3223,7 @@ hello\r\n\
         init_log();
         // Multiple TE headers should be treated as comma-separated
         let input = b"POST / HTTP/1.1\r\n\
-Host: bongonet.org\r\n\
+Host: bongonet.khulnasoft.com\r\n\
 Transfer-Encoding: gzip\r\n\
 Transfer-Encoding: chunked\r\n\
 \r\n\
@@ -3250,7 +3250,7 @@ hello\r\n\
         // Chunked in first header but not last - should NOT be chunked
         // Only the final Transfer-Encoding determines if body is chunked
         let input = b"POST / HTTP/1.1\r\n\
-Host: bongonet.org\r\n\
+Host: bongonet.khulnasoft.com\r\n\
 Transfer-Encoding: chunked\r\n\
 Transfer-Encoding: identity\r\n\
 Content-Length: 5\r\n\
@@ -3859,7 +3859,7 @@ mod test_overread {
         let mut request_data = Vec::new();
         request_data.extend_from_slice(b"GET / HTTP/1.1\r\n");
         request_data.extend_from_slice(
-            format!("Host: bongonet.org\r\nContent-Length: {content_length}\r\n\r\n",).as_bytes(),
+            format!("Host: bongonet.khulnasoft.com\r\nContent-Length: {content_length}\r\n\r\n",).as_bytes(),
         );
 
         if content_length > 0 {
@@ -3904,7 +3904,7 @@ mod test_overread {
     async fn test_reuse_with_chunked_body_overread(#[case] read_body: bool) {
         init_log();
 
-        let headers = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let headers = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n";
         let body_and_extra = b"5\r\nhello\r\n0\r\n\r\nextra";
 
         let mock_io = Builder::new().read(headers).read(body_and_extra).build();
@@ -4095,7 +4095,7 @@ mod test_pipelining {
     async fn reuse_rejects_overread_when_pipelining_disabled(#[case] explicit_off: bool) {
         init_log();
         let request =
-            b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\npipelined_next";
+            b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\npipelined_next";
         let mock_io = Builder::new().read(request).build();
         let mut s = HttpSession::new(Box::new(mock_io));
         if explicit_off {
@@ -4119,7 +4119,7 @@ mod test_pipelining {
     async fn reuse_allows_overread_when_pipelining_enabled() {
         init_log();
         let request =
-            b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\npipelined_next";
+            b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\npipelined_next";
         let mock_io = Builder::new().read(request).build();
         let mut s = HttpSession::new(Box::new(mock_io));
         s.set_pipelining_enabled(true);
@@ -4137,8 +4137,8 @@ mod test_pipelining {
     #[tokio::test]
     async fn reuse_extracts_prefix_without_body_poll() {
         init_log();
-        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mut combined = Vec::with_capacity(req1.len() + req2.len());
         combined.extend_from_slice(req1);
         combined.extend_from_slice(req2);
@@ -4168,8 +4168,8 @@ mod test_pipelining {
     #[tokio::test]
     async fn reuse_extracts_content_length_zero_prefix_without_body_poll() {
         init_log();
-        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\n";
+        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
         let mut combined = Vec::with_capacity(req1.len() + req2.len());
         combined.extend_from_slice(req1);
         combined.extend_from_slice(req2);
@@ -4195,7 +4195,7 @@ mod test_pipelining {
     #[tokio::test]
     async fn read_request_consumes_complete_prefix_without_stream_read() {
         init_log();
-        let prefix = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\n";
+        let prefix = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
         // Mock IO that would panic on any read — ensures the parse is
         // wholly satisfied by the pipelined prefix.
         let mock_io = Builder::new().build();
@@ -4216,7 +4216,7 @@ mod test_pipelining {
     async fn read_request_falls_through_to_stream_for_partial_prefix() {
         init_log();
         let prefix = b"GET /two HTTP/1.1\r\nHost: ";
-        let rest = b"bongonet.org\r\nContent-Length: 0\r\n\r\n";
+        let rest = b"bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
         let mock_io = Builder::new().read(rest).build();
         let mut s = HttpSession::new(Box::new(mock_io));
         s.set_pipelined_prefix(BytesMut::from(&prefix[..]));
@@ -4258,7 +4258,7 @@ mod test_pipelining {
     #[tokio::test]
     async fn idle_read_stashes_bytes_when_pipelining_enabled() {
         init_log();
-        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\n";
+        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
         // Only the first byte of req2 is queued — the idle-branch
         // read in `read_body_or_idle` uses a 1-byte probe buffer,
         // so that's all it will consume. The rest of req2 would
@@ -4356,7 +4356,7 @@ mod test_pipelining {
     #[tokio::test]
     async fn idle_read_still_raises_when_pipelining_disabled() {
         init_log();
-        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\n";
+        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
         // Single byte of req2 — idle-branch read uses a 1-byte probe
         // buffer, error path fires, mock is fully drained.
         let req2_first = b"G";
@@ -4388,8 +4388,8 @@ mod test_pipelining {
         init_log();
 
         // Session A: read request 1 with pipelined request 2 bytes appended.
-        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 0\r\n\r\n";
+        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 0\r\n\r\n";
         let mut combined = Vec::with_capacity(req1.len() + req2.len());
         combined.extend_from_slice(req1);
         combined.extend_from_slice(req2);
@@ -4422,8 +4422,8 @@ mod test_pipelining {
     #[tokio::test]
     async fn bodyless_pipeline_transfers_prefix_without_copying() {
         init_log();
-        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let req1 = b"GET /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mut prefix = BytesMut::with_capacity(req1.len() + req2.len());
         prefix.extend_from_slice(req1);
         prefix.extend_from_slice(req2);
@@ -4445,8 +4445,8 @@ mod test_pipelining {
     #[tokio::test]
     async fn content_length_pipeline_transfers_prefix_without_copying() {
         init_log();
-        let req1 = b"POST /one HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 4\r\n\r\nbody";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let req1 = b"POST /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 4\r\n\r\nbody";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mut prefix = BytesMut::with_capacity(req1.len() + req2.len());
         prefix.extend_from_slice(req1);
         prefix.extend_from_slice(req2);
@@ -4468,8 +4468,8 @@ mod test_pipelining {
     #[tokio::test]
     async fn chunked_pipeline_with_trailers_transfers_prefix_without_copying() {
         init_log();
-        let req1 = b"POST /one HTTP/1.1\r\nHost: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\nX-Test: one\r\n\r\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let req1 = b"POST /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\nX-Test: one\r\n\r\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mut prefix = BytesMut::with_capacity(req1.len() + req2.len());
         prefix.extend_from_slice(req1);
         prefix.extend_from_slice(req2);
@@ -4491,8 +4491,8 @@ mod test_pipelining {
     #[tokio::test]
     async fn escaped_uri_pipeline_does_not_copy_following_requests() {
         init_log();
-        let req1 = b"GET /one?q=a b HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let req1 = b"GET /one?q=a b HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mut prefix = BytesMut::with_capacity(req1.len() + req2.len());
         prefix.extend_from_slice(req1);
         prefix.extend_from_slice(req2);
@@ -4521,10 +4521,10 @@ mod test_pipelining {
     async fn chunked_trailers_across_reads_keep_pipelined_request() {
         init_log();
         let req1_head =
-            b"POST /one HTTP/1.1\r\nHost: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n";
+            b"POST /one HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n";
         // Ends mid trailer section: the final CRLF that terminates it is still on the wire.
         let req1_tail = b"1\r\na\r\n0\r\nX-Test: one\r\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mut rest = BytesMut::from(&b"\r\n"[..]);
         rest.extend_from_slice(req2);
 
@@ -4567,8 +4567,8 @@ mod test_pipelining {
     #[tokio::test]
     async fn escaped_uri_with_bare_lf_keeps_all_pipelined_bytes() {
         init_log();
-        let req1 = b"GET /one?q=a b HTTP/1.1\nHost: bongonet.org\n\n";
-        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let req1 = b"GET /one?q=a b HTTP/1.1\nHost: bongonet.khulnasoft.com\n\n";
+        let req2 = b"GET /two HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let mut prefix = BytesMut::with_capacity(req1.len() + req2.len());
         prefix.extend_from_slice(req1);
         prefix.extend_from_slice(req2);
@@ -4600,7 +4600,7 @@ mod test_pipelining {
         init_log();
         const REQUESTS: usize = 256;
         let requests: Vec<_> = (0..REQUESTS)
-            .map(|i| format!("GET /{i} HTTP/1.1\r\nHost: bongonet.org\r\n\r\n"))
+            .map(|i| format!("GET /{i} HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n"))
             .collect();
         let mut prefix = BytesMut::with_capacity(requests.iter().map(String::len).sum());
         for request in &requests {

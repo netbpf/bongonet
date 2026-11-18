@@ -159,7 +159,7 @@ mod tests {
             .unwrap()
             .build();
         let mut ssl = ssl::Ssl::new(&ssl_context).unwrap();
-        ssl.set_hostname("bongonet.org").unwrap();
+        ssl.set_hostname("bongonet.khulnasoft.com").unwrap();
         ssl.set_verify(ssl::SslVerifyMode::NONE); // we don have a valid cert
         let mut stream = SslStream::new(ssl, client).unwrap();
         Pin::new(&mut stream).connect().await.unwrap();
@@ -181,7 +181,7 @@ mod tests {
                 assert_eq!(ext::get_downstream_fd(ssl), Some(0));
                 assert_eq!(
                     ssl.servername(ssl::NameType::HOST_NAME).unwrap(),
-                    "bongonet.org"
+                    "bongonet.khulnasoft.com"
                 );
                 let cert = format!("{}/tests/keys/server.crt", env!("CARGO_MANIFEST_DIR"));
                 let key = format!("{}/tests/keys/key.pem", env!("CARGO_MANIFEST_DIR"));
@@ -247,6 +247,6 @@ mod tests {
             .unwrap();
         let ssl_digest = stream.ssl_digest().unwrap();
         let sni = ssl_digest.extension.get::<Sni>().unwrap();
-        assert_eq!(sni.0, "bongonet.org");
+        assert_eq!(sni.0, "bongonet.khulnasoft.com");
     }
 }

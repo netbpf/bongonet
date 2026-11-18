@@ -1403,17 +1403,17 @@ mod tests_stream {
         upgrade: &str,
         conn: &str,
     ) -> (HttpSession, SubrequestHandle) {
-        let input = format!("GET / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: {upgrade}\r\nConnection: {conn}\r\n\r\n");
+        let input = format!("GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: {upgrade}\r\nConnection: {conn}\r\n\r\n");
         session_from_input(input.as_bytes()).await
     }
 
     pub(super) async fn build_req() -> (HttpSession, SubrequestHandle) {
-        let input = "GET / HTTP/1.1\r\nHost: bongonet.org\r\n\r\n".to_string();
+        let input = "GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n".to_string();
         session_from_input(input.as_bytes()).await
     }
 
     pub(super) async fn build_head_req() -> (HttpSession, SubrequestHandle) {
-        let input = "HEAD / HTTP/1.1\r\nHost: bongonet.org\r\n\r\n".to_string();
+        let input = "HEAD / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n".to_string();
         session_from_input(input.as_bytes()).await
     }
 
@@ -1430,22 +1430,22 @@ mod tests_stream {
     #[tokio::test]
     async fn read_upgrade_req() {
         // http 1.0
-        let input = b"GET / HTTP/1.0\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        let input = b"GET / HTTP/1.0\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
         let (http_stream, _handle) = session_from_input(input).await;
         assert!(!http_stream.is_upgrade_req());
 
         // different method
-        let input = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        let input = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
         let (http_stream, _handle) = session_from_input(input).await;
         assert!(http_stream.is_upgrade_req());
 
         // missing upgrade header
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nConnection: upgrade\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nConnection: upgrade\r\n\r\n";
         let (http_stream, _handle) = session_from_input(input).await;
         assert!(!http_stream.is_upgrade_req());
 
         // no connection header
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: WebSocket\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: WebSocket\r\n\r\n";
         let (http_stream, _handle) = session_from_input(input).await;
         assert!(http_stream.is_upgrade_req());
 
@@ -1628,7 +1628,7 @@ mod tests_stream {
     async fn read_with_illegal() {
         init_log();
         let input1 = b"GET /a?q=b c HTTP/1.1\r\n";
-        let input2 = b"Host: bongonet.org\r\nContent-Length: 3\r\n\r\n";
+        let input2 = b"Host: bongonet.khulnasoft.com\r\nContent-Length: 3\r\n\r\n";
         let input3 = b"abc";
         let mock_io = Builder::new().read(&input1[..]).read(&input2[..]).build();
         let mut http_stream = GenericHttpSession::new_http1(Box::new(mock_io));
@@ -1727,7 +1727,7 @@ mod tests_stream {
     async fn validate_request_rejects_invalid_content_length(#[case] invalid_value: &str) {
         init_log();
         let input = format!(
-            "POST / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: {}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: {}\r\n\r\n",
             invalid_value
         );
         let mock_io = Builder::new().read(input.as_bytes()).build();
@@ -1749,7 +1749,7 @@ mod tests_stream {
     async fn validate_request_accepts_valid_content_length(#[case] valid_value: &str) {
         init_log();
         let input = format!(
-            "POST / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: {}\r\n\r\n",
+            "POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: {}\r\n\r\n",
             valid_value
         );
         let (mut http_stream, _handle) = session_from_input_no_validate(input.as_bytes()).await;
@@ -1760,14 +1760,14 @@ mod tests_stream {
     #[tokio::test]
     async fn validate_request_accepts_no_content_length() {
         init_log();
-        let input = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+        let input = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
         let (mut http_stream, _handle) = session_from_input_no_validate(input).await;
         let res = http_stream.read_request().await;
         assert!(res.is_ok());
     }
 
-    const POST_CL_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\nContent-Length: 10\r\n\r\n";
-    const POST_CHUNKED_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nUpgrade: websocket\r\nConnection: upgrade\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const POST_CL_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\nContent-Length: 10\r\n\r\n";
+    const POST_CHUNKED_UPGRADE_REQ: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nUpgrade: websocket\r\nConnection: upgrade\r\nTransfer-Encoding: chunked\r\n\r\n";
     const POST_BODY_DATA: &[u8] = b"abcdefghij";
 
     async fn build_upgrade_req_with_body(header: &[u8]) -> (HttpSession, SubrequestHandle) {

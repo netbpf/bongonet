@@ -513,7 +513,7 @@ mod tests {
             let mut send_request = send_request.clone().ready().await.unwrap();
             requests.push(tokio::spawn(async move {
                 let body: Vec<u8> = (0..300_000).map(|j| (j ^ i) as u8).collect();
-                let request = http::Request::post("https://bongonet.org/")
+                let request = http::Request::post("https://bongonet.khulnasoft.com/")
                     .body(())
                     .unwrap();
                 let (response, mut stream) = send_request.send_request(request, false).unwrap();

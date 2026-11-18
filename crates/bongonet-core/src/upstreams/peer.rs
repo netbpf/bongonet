@@ -994,7 +994,7 @@ mod tests {
     /// setting must not reuse it.
     #[test]
     fn peers_differing_in_tls_write_coalescing_do_not_share_connections() {
-        let peer = HttpPeer::new("127.0.0.1:443", true, "bongonet.org".into()).unwrap();
+        let peer = HttpPeer::new("127.0.0.1:443", true, "bongonet.khulnasoft.com".into()).unwrap();
         let mut coalescing = peer.clone();
         coalescing.options.tls_write_coalescing = true;
         assert_ne!(peer.reuse_hash(), coalescing.reuse_hash());
@@ -1003,7 +1003,7 @@ mod tests {
     #[test]
     fn basic_peers_differing_in_tls_write_coalescing_do_not_share_connections() {
         let mut peer = BasicPeer::new("127.0.0.1:443");
-        peer.sni = "bongonet.org".into();
+        peer.sni = "bongonet.khulnasoft.com".into();
         let mut coalescing = peer.clone();
         coalescing.options.tls_write_coalescing = true;
         assert_ne!(peer.reuse_hash(), coalescing.reuse_hash());

@@ -18,10 +18,10 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use tokio::runtime::Runtime;
 use tokio_test::io::Builder;
 
-const BODYLESS_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: bongonet.org\r\n\r\n";
+const BODYLESS_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\n\r\n";
 const CONTENT_LENGTH_REQUEST: &[u8] =
-    b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nContent-Length: 4\r\n\r\nbody";
-const CHUNKED_REQUEST: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.org\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\nX-Test: one\r\n\r\n";
+    b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nContent-Length: 4\r\n\r\nbody";
+const CHUNKED_REQUEST: &[u8] = b"POST / HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\nX-Test: one\r\n\r\n";
 
 fn pipeline(requests: usize, request: &[u8]) -> BytesMut {
     let mut pipeline = BytesMut::with_capacity(requests * request.len());

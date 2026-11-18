@@ -984,8 +984,8 @@ async fn test_connect_proxying_disallowed_h1() {
     init();
 
     for request in [
-        b"CONNECT bongonet.org:443 HTTP/1.1\r\nHost: bongonet.org:443\r\n\r\n".as_slice(),
-        b"CONNECT bongonet.org:443 HTTP/1.1\r\n\r\n".as_slice(),
+        b"CONNECT bongonet.khulnasoft.com:443 HTTP/1.1\r\nHost: bongonet.khulnasoft.com:443\r\n\r\n".as_slice(),
+        b"CONNECT bongonet.khulnasoft.com:443 HTTP/1.1\r\n\r\n".as_slice(),
         b"CONNECT /ws?token=a@b.com HTTP/1.1\r\nHost: other.example\r\n\r\n".as_slice(),
     ] {
         let mut stream = TcpStream::connect("127.0.0.1:6147").await.unwrap();
@@ -1011,7 +1011,7 @@ async fn test_connect_proxying_disallowed_h2() {
 
     let request = Request::builder()
         .method("CONNECT")
-        .uri("http://bongonet.org:443/")
+        .uri("http://bongonet.khulnasoft.com:443/")
         .body(())
         .unwrap();
     let (response, _body) = h2.send_request(request, true).unwrap();
@@ -1042,7 +1042,7 @@ async fn test_connect_proxying_allowed_h1() {
 
     let mut stream = TcpStream::connect("127.0.0.1:6160").await.unwrap();
     let request = format!(
-        "CONNECT bongonet.org:443 HTTP/1.1\r\nHost: bongonet.org:443\r\nX-Port: {}\r\n\r\n",
+        "CONNECT bongonet.khulnasoft.com:443 HTTP/1.1\r\nHost: bongonet.khulnasoft.com:443\r\nX-Port: {}\r\n\r\n",
         upstream_addr.port()
     );
     stream.write_all(request.as_bytes()).await.unwrap();
@@ -1075,7 +1075,7 @@ async fn test_connect_proxying_allowed_h1_without_host() {
 
     let mut stream = TcpStream::connect("127.0.0.1:6160").await.unwrap();
     let request = format!(
-        "CONNECT bongonet.org:443 HTTP/1.1\r\nX-Port: {}\r\n\r\n",
+        "CONNECT bongonet.khulnasoft.com:443 HTTP/1.1\r\nX-Port: {}\r\n\r\n",
         upstream_addr.port()
     );
     stream.write_all(request.as_bytes()).await.unwrap();
@@ -1107,7 +1107,7 @@ async fn test_absolute_form_request_target_h1() {
 
     let mut stream = TcpStream::connect("127.0.0.1:6147").await.unwrap();
     let request = format!(
-        "GET http://bongonet.org/absolute?q=1 HTTP/1.1\r\nHost: bongonet.org\r\nX-Port: {}\r\n\r\n",
+        "GET http://bongonet.khulnasoft.com/absolute?q=1 HTTP/1.1\r\nHost: bongonet.khulnasoft.com\r\nX-Port: {}\r\n\r\n",
         upstream_addr.port()
     );
     stream.write_all(request.as_bytes()).await.unwrap();
@@ -1120,7 +1120,7 @@ async fn test_absolute_form_request_target_h1() {
     // whether the next hop is an origin server (§3.2.1) or another proxy (§3.2.2).
     let upstream_request = upstream.await.unwrap();
     assert_eq!(
-        "GET http://bongonet.org/absolute?q=1 HTTP/1.1",
+        "GET http://bongonet.khulnasoft.com/absolute?q=1 HTTP/1.1",
         upstream_request.lines().next().unwrap()
     );
 }
