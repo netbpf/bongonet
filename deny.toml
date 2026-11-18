@@ -6,9 +6,10 @@ all-features = true
 
 [advisories]
 yanked = "warn"
-unmaintained = "warn"
-notice = "warn"
+unmaintained = "workspace"
 ignore = [
+    "RUSTSEC-2024-0388", # derivative: unmaintained (no safe upgrade; direct dep of bongonet-core)
+    "RUSTSEC-2026-0543", # chrono: unmaintained (all versions; direct dep of bongonet-core)
     "RUSTSEC-2026-0098", # rustls-webpki: URI name constraints incorrectly accepted
     "RUSTSEC-2026-0099", # rustls-webpki: name constraints accepted for wildcard certs
     "RUSTSEC-2026-0104", # rustls-webpki: reachable panic in CRL parsing
