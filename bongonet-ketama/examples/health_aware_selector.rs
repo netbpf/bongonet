@@ -31,8 +31,8 @@ struct HealthAwareNodeSelector<'a> {
     node_health_repo: &'a NodeHealthRepository,
 }
 
-impl<'a> HealthAwareNodeSelector<'a> {
-    fn new(r: Continuum, tries: usize, nhr: &NodeHealthRepository) -> HealthAwareNodeSelector {
+impl HealthAwareNodeSelector<'_> {
+    fn new(r: Continuum, tries: usize, nhr: &NodeHealthRepository) -> HealthAwareNodeSelector<'_> {
         HealthAwareNodeSelector {
             ring: r,
             max_tries: tries,

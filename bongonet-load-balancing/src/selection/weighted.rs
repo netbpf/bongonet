@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ pub struct Weighted<H = FnvHasher> {
 
 impl<H: SelectionAlgorithm> BackendSelection for Weighted<H> {
     type Iter = WeightedIterator<H>;
+
+    type Config = ();
 
     fn build(backends: &BTreeSet<Backend>) -> Self {
         assert!(
@@ -86,8 +88,11 @@ impl<H: SelectionAlgorithm> BackendIter for WeightedIterator<H> {
 
         if self.first {
             // initial hash, select from the weighted list
-            self.first = false;
             let len = self.backend.weighted.len();
+            if len == 0 {
+                return None;
+            }
+            self.first = false;
             let index = self.backend.weighted[self.index as usize % len];
             Some(&self.backend.backends[index as usize])
         } else {
@@ -149,17 +154,33 @@ mod test {
     }
 
     #[test]
+    fn weighted_all_zero_weight_returns_none_instead_of_panicking() {
+        let b1 = Backend::new_with_weight("1.1.1.1:80", 0).unwrap();
+        let b2 = Backend::new_with_weight("1.0.0.1:80", 0).unwrap();
+        let backends = BTreeSet::from_iter([b1, b2]);
+        let hash: Arc<Weighted<FnvHasher>> = Arc::new(Weighted::build(&backends));
+
+        let mut iter = hash.iter(b"test");
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
     fn test_round_robin() {
         let b1 = Backend::new("1.1.1.1:80").unwrap();
         let mut b2 = Backend::new("1.0.0.1:80").unwrap();
         b2.weight = 8; // 8x than the rest
         let b3 = Backend::new("1.0.0.255:80").unwrap();
+        // sorted with: [b2, b3, b1]
+        // weighted: [0, 0, 0, 0, 0, 0, 0, 0, 1, 2]
         let backends = BTreeSet::from_iter([b1.clone(), b2.clone(), b3.clone()]);
         let hash: Arc<Weighted<RoundRobin>> = Arc::new(Weighted::build(&backends));
 
         // same hash iter over
         let mut iter = hash.iter(b"test");
         // first, should be weighted
+        // weighted: [0, 0, 0, 0, 0, 0, 0, 0, 1, 2]
+        //            ^
         assert_eq!(iter.next(), Some(&b2));
         // fallbacks, should be round robin
         assert_eq!(iter.next(), Some(&b3));
@@ -168,6 +189,9 @@ mod test {
         assert_eq!(iter.next(), Some(&b3));
 
         // round robin, ignoring the hash key
+        // index advanced 5 steps
+        // weighted: [0, 0, 0, 0, 0, 0, 0, 0, 1, 2]
+        //                           ^
         let mut iter = hash.iter(b"test1");
         assert_eq!(iter.next(), Some(&b2));
         let mut iter = hash.iter(b"test1");
@@ -179,6 +203,7 @@ mod test {
         let mut iter = hash.iter(b"test1");
         assert_eq!(iter.next(), Some(&b1));
         let mut iter = hash.iter(b"test1");
+        // rounded
         assert_eq!(iter.next(), Some(&b2));
         let mut iter = hash.iter(b"test1");
         assert_eq!(iter.next(), Some(&b2));
