@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use crate::app::echo::{EchoApp, HttpEchoApp};
+use bongonet::apps::http_app::HttpServer;
 use bongonet::services::listening::Service;
 
 pub fn echo_service() -> Service<EchoApp> {
     Service::new("Echo Service".to_string(), EchoApp)
 }
 
-pub fn echo_service_http() -> Service<HttpEchoApp> {
-    Service::new("Echo Service HTTP".to_string(), HttpEchoApp)
+pub fn echo_service_http() -> Service<HttpServer<HttpEchoApp>> {
+    let server = HttpServer::new_app(HttpEchoApp);
+    Service::new("Echo Service HTTP".to_string(), server)
 }

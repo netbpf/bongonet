@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ use bongonet::protocols::TcpKeepalive;
 use bongonet::server::configuration::Opt;
 use bongonet::server::{Server, ShutdownWatch};
 use bongonet::services::background::{background_service, BackgroundService};
-use bongonet::services::{listening::Service as ListeningService, Service};
+use bongonet::services::ServiceWithDependents;
 
 use async_trait::async_trait;
 use clap::Parser;
@@ -132,6 +132,8 @@ pub fn main() {
         idle: Duration::from_secs(60),
         interval: Duration::from_secs(5),
         count: 5,
+        #[cfg(target_os = "linux")]
+        user_timeout: Duration::from_secs(85),
     });
 
     echo_service_http.add_tcp_with_settings("0.0.0.0:6145", options);
@@ -158,6 +160,10 @@ pub fn main() {
     {
         tls_settings = TlsSettings::intermediate(&cert_path, &key_path).unwrap();
     }
+    #[cfg(feature = "s2n")]
+    {
+        tls_settings = TlsSettings::intermediate(&cert_path, &key_path).unwrap();
+    }
     #[cfg(not(feature = "any_tls"))]
     {
         tls_settings = TlsSettings;
@@ -179,12 +185,12 @@ pub fn main() {
         &key_path,
     );
 
-    let mut prometheus_service_http = ListeningService::prometheus_http_service();
+    let mut prometheus_service_http = bongonet_prometheus::prometheus_http_service();
     prometheus_service_http.add_tcp("127.0.0.1:6150");
 
     let background_service = background_service("example", ExampleBackgroundService {});
 
-    let services: Vec<Box<dyn Service>> = vec![
+    let services: Vec<Box<dyn ServiceWithDependents>> = vec![
         Box::new(echo_service),
         Box::new(echo_service_http),
         Box::new(proxy_service),

@@ -1,4 +1,4 @@
-// Copyright 2025 KhulnaSoft, Ltd
+// Copyright 2026 KhulnaSoft, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use bongonet::{connectors::http::Connector, prelude::*};
-use bongonet_http::RequestHeader;
 use regex::Regex;
 
 #[tokio::main]
@@ -22,7 +21,7 @@ async fn main() -> Result<()> {
 
     // create the HTTP session
     let peer_addr = "1.1.1.1:443";
-    let mut peer = HttpPeer::new(peer_addr, true, "one.one.one.one".into());
+    let mut peer = HttpPeer::new(peer_addr, true, "one.one.one.one".into())?;
     peer.options.set_http_version(2, 1);
     let (mut http, _reused) = connector.get_http_session(&peer).await?;
 
