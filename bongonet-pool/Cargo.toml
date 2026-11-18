@@ -1,10 +1,10 @@
 [package]
 name = "bongonet-pool"
 version = "0.4.0"
-authors = ["Md Sulaiman <dev.sulaiman@icloud.com>"]
+authors = ["Md Sulaiman <ceo@khulnasoft.com>"]
 license = "Apache-2.0"
 edition = "2021"
-repository = "https://github.com/khulnasoft/bongonet"
+repository = "https://github.com/netbpf/bongonet"
 categories = ["network-programming"]
 keywords = ["async", "pooling", "bongonet"]
 description = """
@@ -18,12 +18,20 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { workspace = true, features = ["sync", "io-util"] }
-thread_local = "1.0"
 lru = { workspace = true }
 log = { workspace = true }
 parking_lot = "0.12"
+dashmap = "5"
 crossbeam-queue = "0.3"
+futures = { workspace = true }
 bongonet-timeout = { version = "0.4.0", path = "../bongonet-timeout" }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "connection_pool"
+harness = false

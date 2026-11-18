@@ -1,10 +1,11 @@
 [package]
 name = "bongonet-proxy"
-version = "0.3.0"
-authors = ["Md Sulaiman <admin@khulnasoft.com>"]
+version = "0.4.0"
+authors = ["Md Sulaiman <ceo@khulnasoft.com>"]
 license = "Apache-2.0"
 edition = "2021"
-repository = "https://github.com/khulnasoft/bongonet"
+rust-version = "1.85"
+repository = "https://github.com/netbpf/bongonet"
 categories = ["asynchronous", "network-programming"]
 keywords = ["async", "http", "proxy", "bongonet"]
 exclude = ["tests/*"]
@@ -17,50 +18,82 @@ Bongonet HTTP proxy APIs and traits.
 name = "bongonet_proxy"
 path = "src/lib.rs"
 
+[[bench]]
+name = "shutdown_signal"
+harness = false
+
 [dependencies]
 bongonet-error = { version = "0.4.0", path = "../bongonet-error" }
 bongonet-core = { version = "0.4.0", path = "../bongonet-core", default-features = false }
 bongonet-cache = { version = "0.4.0", path = "../bongonet-cache", default-features = false }
+bongonet-timeout = { version = "0.4.0", path = "../bongonet-timeout", optional = true }
 tokio = { workspace = true, features = ["macros", "net"] }
 bongonet-http = { version = "0.4.0", path = "../bongonet-http" }
 http = { workspace = true }
-futures = "0.3"
+futures = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 log = { workspace = true }
 h2 = { workspace = true }
 once_cell = { workspace = true }
-clap = { version = "3.2.25", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
 regex = "1"
+rand = "0.8"
 
 [dev-dependencies]
-reqwest = { version = "0.11", features = [
+tokio = { workspace = true, features = ["test-util"] }
+reqwest = { version = "0.12", features = [
     "gzip",
     "rustls-tls",
+    "http2",
 ], default-features = false }
+httparse = { workspace = true }
 tokio-test = "0.4"
-env_logger = "0.9"
-hyper = "0.14"
-tokio-tungstenite = "0.20.1"
+env_logger = "0.11"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.26"
 bongonet-limits = { version = "0.4.0", path = "../bongonet-limits" }
 bongonet-load-balancing = { version = "0.4.0", path = "../bongonet-load-balancing", default-features=false }
+bongonet-prometheus = { version = "0.4.0", path = "../bongonet-prometheus" }
+bongonet-test-utils = { version = "0.4.0", path = "../bongonet-test-utils" }
 prometheus = "0"
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.8"
+serde_yaml = "0.9"
+tempfile = "3"
 
 [target.'cfg(unix)'.dev-dependencies]
-hyperlocal = "0.8"
+hyperlocal = "0.9"
 
 [features]
 default = []
 openssl = ["bongonet-core/openssl", "bongonet-cache/openssl", "openssl_derived"]
-boringssl = ["bongonet-core/boringssl", "bongonet-cache/boringssl", "openssl_derived"]
+boringssl = [
+    "bongonet-core/boringssl",
+    "bongonet-cache/boringssl",
+    "openssl_derived",
+]
 rustls = ["bongonet-core/rustls", "bongonet-cache/rustls", "any_tls"]
+s2n = ["bongonet-core/s2n", "bongonet-cache/s2n", "any_tls"]
 openssl_derived = ["any_tls"]
 any_tls = []
 sentry = ["bongonet-core/sentry"]
+patched_http1 = ["bongonet-core/patched_http1"]
+upstream_modules = []
+connection_filter = ["bongonet-core/connection_filter"]
+trace = ["bongonet-cache/trace"]
+early_body_buffer = ["dep:bongonet-timeout"]
+
+[[example]]
+name = "connection_filter"
+required-features = ["connection_filter"]
+
+[[example]]
+name = "body_routing"
+required-features = ["early_body_buffer"]
 
 # or locally cargo doc --config "build.rustdocflags='--cfg doc_async_trait'"
 [package.metadata.docs.rs]

@@ -1,11 +1,11 @@
 [package]
 name = "TinyUFO"
 version = "0.4.0"
-authors = ["Md Sulaiman <dev.sulaiman@icloud.com>"]
+authors = ["Md Sulaiman <ceo@khulnasoft.com>"]
 edition = "2021"
 license = "Apache-2.0"
 description = "In-memory cache implementation with TinyLFU as the admission policy and S3-FIFO as the eviction policy"
-repository = "https://github.com/khulnasoft/bongonet"
+repository = "https://github.com/netbpf/bongonet"
 categories = ["algorithms", "caching"]
 keywords = ["cache", "bongonet"]
 
@@ -22,9 +22,9 @@ crossbeam-queue = "0"
 crossbeam-skiplist = "0"
 
 [dev-dependencies]
-rand = "0.8"
-lru = "0"
-zipf = "7"
+rand = "0.9"
+lru = { workspace = true }
+rand_distr = "0.5"
 moka = { version = "0", features = ["sync"] }
 dhat = "0"
 quick_cache = "0.6"

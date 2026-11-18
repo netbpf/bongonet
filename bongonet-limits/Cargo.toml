@@ -1,11 +1,11 @@
 [package]
 name = "bongonet-limits"
 version = "0.4.0"
-authors = ["Md Sulaiman <dev.sulaiman@icloud.com>"]
+authors = ["Md Sulaiman <ceo@khulnasoft.com>"]
 license = "Apache-2.0"
 description = "A library for rate limiting and event frequency estimation"
 edition = "2021"
-repository = "https://github.com/khulnasoft/bongonet"
+repository = "https://github.com/netbpf/bongonet"
 categories = ["algorithms"]
 keywords = ["rate-limit", "bongonet"]
 
