@@ -1,10 +1,21 @@
 # Prometheus
 
-Bongonet has a built-in prometheus HTTP metric server for scraping.
+The [`bongonet-prometheus`](https://docs.rs/bongonet-prometheus) crate provides a
+Prometheus HTTP metrics server for scraping.
+
+## Adding the Dependency
+
+Add `bongonet-prometheus` to your `Cargo.toml`:
+
+```toml
+bongonet-prometheus = "0.9.0"
+```
+
+## Setting up a Prometheus Metrics Endpoint
 
 ```rust
     ...
-    let mut prometheus_service_http = Service::prometheus_http_service();
+    let mut prometheus_service_http = bongonet_prometheus::prometheus_http_service();
     prometheus_service_http.add_tcp("0.0.0.0:1234");
     my_server.add_service(prometheus_service_http);
     my_server.run_forever();

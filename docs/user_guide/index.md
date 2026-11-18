@@ -6,6 +6,7 @@ In this guide, we will cover the most used features, operations and settings of 
 * [Start and stop](start_stop.md)
 * [Graceful restart and graceful shutdown](graceful.md)
 * [Configuration](conf.md)
+* [Sharing runtimes between services](runtime_groups.md)
 * [Daemonization](daemon.md)
 * [Systemd integration](systemd.md)
 * [Handling panics](panic.md)
@@ -15,7 +16,7 @@ In this guide, we will cover the most used features, operations and settings of 
 ## Building HTTP proxies
 * [Life of a request: `bongonet-proxy` phases and filters](phase.md)
 * [`Peer`: how to connect to upstream](peer.md)
-* [Sharing state across phases with `CTX`](ctx.md)
+* [Sharing state across phases and connections with `CTX`](ctx.md) (including tracking active connection counts)
 * [How to return errors](errors.md)
 * [Examples: take control of the request](modify_filter.md)
 * [Connection pooling and reuse](pooling.md)
