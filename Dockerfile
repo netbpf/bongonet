@@ -1,20 +1,23 @@
-FROM debian:latest as builder
+FROM rust:1.92-bookworm AS builder
 
-ARG BUILDARCH
-RUN apt-get -qq update \
-    && apt-get -qq install -y --no-install-recommends \
-       gcc g++ libfindbin-libs-perl \
-       make cmake libclang-dev git \
-       wget curl gnupg ca-certificates lsb-release \
-    && wget --no-check-certificate -O - https://openresty.org/package/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/openresty.gpg \
-    && if [ "${BUILDARCH}" = "arm64" ]; then URL="http://openresty.org/package/arm64/debian"; else URL="http://openresty.org/package/debian"; fi \
-    && echo "deb [arch=$BUILDARCH signed-by=/usr/share/keyrings/openresty.gpg] ${URL} $(lsb_release -sc) openresty" | tee /etc/apt/sources.list.d/openresty.list > /dev/null \
-    && apt-get -qq update \
-    && apt-get -qq install -y openresty --no-install-recommends
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake libclang-dev clang pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-WORKDIR /var/opt/bongonet
+WORKDIR /app
 COPY . .
-RUN cargo build
+RUN cargo generate-lockfile --ignore-rust-version \
+    && cargo build --release --locked -p bongonet --example server
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /usr/sbin/nologin bongonet
+
+COPY --from=builder /app/target/release/examples/server /usr/local/bin/bongonet
+
+USER bongonet
+EXPOSE 80 443
+ENTRYPOINT ["/usr/local/bin/bongonet"]

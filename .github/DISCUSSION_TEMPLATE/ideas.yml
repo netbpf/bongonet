@@ -1,0 +1,37 @@
+title: "[Idea]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Propose an enhancement before writing code. For reproducible bugs, open an issue instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this solve, and for whom?
+      placeholder: Describe the use case and who is blocked today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Outline the API or behavior you have in mind, including affected crates.
+      placeholder: e.g. a new filter hook in bongonet-proxy
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Could this be built as a third-party crate or with existing extension points?
+    validations:
+      required: false
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to open an issue and work on this
+          required: false

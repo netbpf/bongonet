@@ -1,0 +1,23 @@
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for your interest in Bongonet! Please search existing discussions before opening a new one.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: Describe what you would like to know as clearly and concisely as possible.
+      placeholder: What would you like to ask?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any relevant details, such as what you have already tried, links, or code snippets.
+      placeholder: Share any additional information that may help others answer your question.
+    validations:
+      required: false

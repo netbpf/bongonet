@@ -1,0 +1,22 @@
+title: "[Contributor]: "
+labels: ["help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For contributors and maintainers: review coordination, mentoring, PR ownership, and
+        conventions. Please read `.github/CONTRIBUTING.md` first.
+  - type: textarea
+    id: topic
+    attributes:
+      label: Topic
+      description: What would you like to coordinate or discuss?
+    validations:
+      required: true
+  - type: textarea
+    id: links
+    attributes:
+      label: Related issues or PRs
+      description: Link the issues, PRs, or docs this concerns.
+    validations:
+      required: false

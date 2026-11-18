@@ -1,0 +1,29 @@
+title: "[Maintenance]: "
+labels: ["dependencies"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Track dependency/RUSTSEC remediation, MSRV changes, CI, and documentation WIP.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Which crates, dependencies, docs, or CI jobs are affected?
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Proposed plan
+      description: Describe the upgrade/removal path and any compatibility constraints.
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Owner
+      description: Who will drive this? Leave blank if you are looking for an owner.
+      placeholder: "@username or unassigned"
+    validations:
+      required: false

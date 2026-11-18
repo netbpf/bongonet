@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Bongonet documentation
+    url: https://github.com/netbpf/bongonet/tree/main/docs
+    about: Read the documentation and guides before filing an issue.
+  - name: Questions and support
+    url: mailto:opensource@khulnasoft.com
+    about: Contact the maintainers directly with questions or support requests.
