@@ -27,7 +27,7 @@ runs:
         git fetch --no-tags origin "$BASE"
         files="$(git diff --name-only "origin/$BASE...$HEAD" || git diff --name-only "origin/$BASE" "$HEAD")"
         printf '%s\n' "$files"
-        if printf '%s\n' "$files" | grep -Eq '(^|/)(Cargo\.toml|Cargo\.lock|build\.rs|rust-toolchain(\.toml)?|rustfmt\.toml)$|^\.cargo/|\.rs$|^\.github/(actions|workflows)/|^scripts/'; then
+        if printf '%s\n' "$files" | grep -Eq '(^|/)(Cargo\.toml|Cargo\.lock|build\.rs|rust-toolchain(\.toml)?|rustfmt\.toml)$|^\.cargo/|\.rs$|^\.github/(actions|workflows)/|^script/'; then
           echo "rust_changed=true" >> "$GITHUB_OUTPUT"
         else
           echo "rust_changed=false" >> "$GITHUB_OUTPUT"

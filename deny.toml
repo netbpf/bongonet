@@ -1,0 +1,49 @@
+# cargo-deny policy for Bongonet.
+# Advisory exceptions mirror .cargo/audit.toml, which cargo audit uses.
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "warn"
+unmaintained = "warn"
+notice = "warn"
+ignore = [
+    "RUSTSEC-2026-0098", # rustls-webpki: URI name constraints incorrectly accepted
+    "RUSTSEC-2026-0099", # rustls-webpki: name constraints accepted for wildcard certs
+    "RUSTSEC-2026-0104", # rustls-webpki: reachable panic in CRL parsing
+    "RUSTSEC-2026-0258", # h2: unbounded empty DATA frames (optional worker-s3 chain)
+    "RUSTSEC-2026-0346", # rustls: Debug impls expose TLS secrets (legacy 0.21 chain)
+    "RUSTSEC-2026-0349", # rustls: unauthenticated ServerHello downgrade (legacy 0.21 chain)
+    "RUSTSEC-2026-0381", # webpki-roots: bundled emSign intermediates
+    "RUSTSEC-2026-0382", # rustls-webpki: distrusted intermediates accepted
+    "RUSTSEC-2026-0387", # crypto-bigint: timing variability in SigV4a path
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"

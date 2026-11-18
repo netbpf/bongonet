@@ -29,3 +29,19 @@ runs:
         fi
         rustc +"$TOOLCHAIN" --version
         cargo +"$TOOLCHAIN" --version
+    - name: Select pinned toolchain
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+      run: |
+        set -euo pipefail
+        echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+        rustc --version
+        cargo --version
+    - name: Ensure Cargo.lock exists
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ ! -f Cargo.lock ]]; then
+          cargo generate-lockfile --ignore-rust-version
+        fi
