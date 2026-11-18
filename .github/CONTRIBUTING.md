@@ -40,17 +40,17 @@ change lands in `main`, we will close your PR.
 ### Caveats
 
 Currently, internal contributions will take priority. Today Bongonet is being maintained by
-Khulnasoft's Content Delivery team, and internal Khulnasoft proxy services are a primary user of
+KhulnaSoft's Content Delivery team, and internal KhulnaSoft proxy services are a primary user of
 Bongonet. We value the community's work on Bongonet, but the reality is that our team has a limited
 amount of resources and time. We can't promise we will review or address all PRs or issues in a
 timely manner.
 
 ## Conduct
 
-Bongonet and Khulnasoft OpenSource generally follows the [Contributor Covenant Code of Conduct].
-Violating the CoC could result in a warning or a ban to Bongonet or any and all repositories in the Khulnasoft organization.
+Bongonet and KhulnaSoft OpenSource generally follows the [Contributor Covenant Code of Conduct].
+Violating the CoC could result in a warning or a ban to Bongonet or any and all repositories in the KhulnaSoft organization.
 
-[Contributor Covenant Code of Conduct]: https://github.com/khulnasoft/.github/blob/26b37ca2ba7ab3d91050ead9f2c0e30674d3b91e/CODE_OF_CONDUCT.md
+[Contributor Covenant Code of Conduct]: https://github.com/netbpf/.github/blob/26b37ca2ba7ab3d91050ead9f2c0e30674d3b91e/CODE_OF_CONDUCT.md
 
 ## Contact
 
