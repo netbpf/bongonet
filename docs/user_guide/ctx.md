@@ -110,7 +110,7 @@ impl ProxyHttp for MyProxy {
 }
 ```
 
-The complete example can be found under [`bongonet-proxy/examples/ctx.rs`](../../bongonet-proxy/examples/ctx.rs). You can run it using `cargo`:
+The complete example can be found under [`bongonet-proxy/examples/ctx.rs`](../../crates/bongonet-proxy/examples/ctx.rs). You can run it using `cargo`:
 ```
 RUST_LOG=INFO cargo run --example ctx
 ```

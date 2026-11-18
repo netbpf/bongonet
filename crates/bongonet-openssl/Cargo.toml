@@ -1,0 +1,31 @@
+[package]
+name = "bongonet-openssl"
+version = "0.4.0"
+authors = ["Md Sulaiman <ceo@khulnasoft.com>"]
+license = "Apache-2.0"
+edition = "2021"
+repository = "https://github.com/netbpf/bongonet"
+categories = ["asynchronous", "network-programming"]
+keywords = ["async", "tls", "ssl", "bongonet"]
+description = """
+OpenSSL async APIs for Bongonet.
+"""
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "bongonet_openssl"
+path = "src/lib.rs"
+
+[dependencies]
+openssl-sys = "0.9"
+openssl = { version = "0.10.72", features = ["vendored"] }
+tokio-openssl = { version = "0.6" }
+libc = "0.2.70"
+foreign-types = { version = "0.3"}
+
+[dev-dependencies]
+tokio-test = "0.4"
+tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

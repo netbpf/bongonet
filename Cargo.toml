@@ -5,32 +5,7 @@
 
 [workspace]
 resolver = "2"
-members = [
-    "bongonet",
-    "bongonet-core",
-    "bongonet-pool",
-    "bongonet-error",
-    "bongonet-limits",
-    "bongonet-timeout",
-    "bongonet-header-serde",
-    "bongonet-proxy",
-    "bongonet-cache",
-    "bongonet-http",
-    "bongonet-http-parser",
-    "bongonet-lru",
-    "bongonet-openssl",
-    "bongonet-boringssl",
-    "bongonet-runtime",
-    "bongonet-rustls",
-    "bongonet-s2n",
-    "bongonet-ketama",
-    "bongonet-load-balancing",
-    "bongonet-memory-cache",
-    "bongonet-prometheus",
-    "bongonet-foundations",
-    "bongonet-test-utils",
-    "tinyufo",
-]
+members = ["crates/*"]
 
 [workspace.dependencies]
 bstr = "1.12.0"
@@ -39,7 +14,7 @@ tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.12", features = ["rt"] }
 async-trait = "0.1.42"
 httparse = "1"
-bongonet-http-parser = { version = "0.4.0", path = "bongonet-http-parser" }
+bongonet-http-parser = { version = "0.4.0", path = "crates/bongonet-http-parser" }
 bytes = "1.0"
 derivative = "2.2.0"
 http = "1"

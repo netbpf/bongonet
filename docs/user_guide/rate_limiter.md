@@ -160,7 +160,7 @@ To use the example above,
      ```
 
 ## Complete Example
-You can run the pre-made example code in the [`bongonet-proxy` examples folder](https://github.com/netbpf/bongonet/tree/main/bongonet-proxy/examples/rate_limiter.rs) with
+You can run the pre-made example code in the [`bongonet-proxy` examples folder](https://github.com/netbpf/bongonet/tree/main/crates/bongonet-proxy/examples/rate_limiter.rs) with
 
 ```
 cargo run --example rate_limiter

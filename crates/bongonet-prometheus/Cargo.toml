@@ -1,0 +1,25 @@
+[package]
+name = "bongonet-prometheus"
+version = "0.4.0"
+authors = ["Bongonet Team at KhulnaSoft <bongonet@khulnasoft.com>"]
+license = "Apache-2.0"
+edition = "2021"
+repository = "https://github.com/netbpf/bongonet"
+categories = ["asynchronous", "network-programming"]
+keywords = ["async", "http", "prometheus", "bongonet"]
+description = """
+A Prometheus metrics HTTP server for bongonet services.
+"""
+
+[lib]
+name = "bongonet_prometheus"
+path = "src/lib.rs"
+
+[dependencies]
+bongonet-core = { version = "0.4.0", path = "../bongonet-core", default-features = false }
+prometheus = "0.14"
+async-trait = { workspace = true }
+http = { workspace = true }
+
+[lints]
+workspace = true

@@ -349,9 +349,9 @@ From a client's perspective, the service is always running because the listening
 
 The full code for this example is available in this repository under
 
-[bongonet-proxy/examples/load_balancer.rs](../bongonet-proxy/examples/load_balancer.rs)
+[bongonet-proxy/examples/load_balancer.rs](../crates/bongonet-proxy/examples/load_balancer.rs)
 
 Other examples that you may find helpful are also available here
 
-[bongonet-proxy/examples/](../bongonet-proxy/examples/)
-[bongonet/examples](../bongonet/examples/)
+[bongonet-proxy/examples/](../crates/bongonet-proxy/examples/)
+[bongonet/examples](../crates/bongonet/examples/)
