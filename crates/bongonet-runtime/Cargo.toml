@@ -26,7 +26,7 @@ once_cell = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 log = { workspace = true }
 dial9-tokio-telemetry = { version = "0.3", optional = true }
-dial9-perf-self-profile = { version = "0.4", optional = true }
+dial9-perf-self-profile = { version = "0.5", optional = true }
 # Dial9's metrique dependencies require Rust 1.89. This optional feature is
 # therefore outside Bongonet's Rust 1.85 default-feature MSRV check.
 # Dial9 permits incompatible metrique companion releases with broad 0.1 ranges.
