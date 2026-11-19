@@ -37,7 +37,7 @@ metrique-core = { version = "=0.1.20", optional = true }
 metrique-macro = { version = "=0.1.16", optional = true }
 metrique-service-metrics = { version = "=0.1.21", optional = true }
 metrique-timesource = { version = "=0.1.9", optional = true }
-metrique-writer = { version = "=0.1.22", optional = true }
+metrique-writer = { version = "=0.1.29", optional = true }
 metrique-writer-core = { version = "=0.1.16", optional = true }
 metrique-writer-macro = { version = "=0.1.9", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
